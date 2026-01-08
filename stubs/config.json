@@ -1,0 +1,75 @@
+{
+  "stubs": [
+    {
+      "function_name": "order-processor",
+      "priority": 1,
+      "request_match": {
+        "body_contains": "\"status\": \"new\""
+      },
+      "response_file": "orders/success.json",
+      "status_code": 200,
+      "delay_ms": 100
+    },
+    {
+      "function_name": "order-processor",
+      "priority": 2,
+      "request_match": {
+        "body_contains": "\"status\": \"retry\""
+      },
+      "response_file": "orders/pending.json",
+      "status_code": 202,
+      "delay_ms": 200
+    },
+    {
+      "function_name": "order-processor",
+      "priority": 3,
+      "request_match": {
+        "body_contains": "\"order_id\": \"FAIL\""
+      },
+      "response_file": "orders/failed.json",
+      "status_code": 400
+    },
+    {
+      "function_name": "payment-processor",
+      "priority": 1,
+      "request_match": {
+        "body_json": {
+          "amount": {
+            "less_than": 10000
+          }
+        }
+      },
+      "response_file": "payments/authorized.json",
+      "status_code": 200,
+      "delay_ms": 150
+    },
+    {
+      "function_name": "payment-processor",
+      "priority": 2,
+      "request_match": {
+        "body_json": {
+          "card_type": "FRAUD_TEST"
+        }
+      },
+      "response_file": "payments/fraud.json",
+      "status_code": 403
+    },
+    {
+      "function_name": "customer-service",
+      "priority": 1,
+      "request_match": {
+        "headers": {
+          "X-Customer-Tier": "premium"
+        }
+      },
+      "response_file": "customers/premium.json",
+      "status_code": 200
+    },
+    {
+      "function_name": "customer-service",
+      "priority": 2,
+      "response_file": "customers/standard.json",
+      "status_code": 200
+    }
+  ]
+}

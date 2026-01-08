@@ -1,0 +1,16 @@
+{
+  "statusCode": 200,
+  "body": {
+    "transaction_id": "TXN-{{randomValue type='ALPHANUMERIC' length=12}}",
+    "status": "AUTHORIZED",
+    "amount": "{{jsonPath request.body '$.amount'}}",
+    "currency": "{{jsonPath request.body '$.currency'}}",
+    "card_last4": "4242",
+    "authorization_code": "{{randomValue type='NUMERIC' length=6}}",
+    "timestamp": "{{now}}",
+    "processor_response": {
+      "code": "00",
+      "message": "Approved"
+    }
+  }
+}

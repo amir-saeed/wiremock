@@ -1,0 +1,19 @@
+{
+  "statusCode": 400,
+  "body": {
+    "errorType": "ValidationException",
+    "errorMessage": "Invalid order data",
+    "errors": [
+      {
+        "field": "items",
+        "message": "At least one item is required"
+      },
+      {
+        "field": "customer_id",
+        "message": "Customer not found"
+      }
+    ],
+    "timestamp": "{{now}}",
+    "request_id": "{{randomValue type='UUID'}}"
+  }
+}

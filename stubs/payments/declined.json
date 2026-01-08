@@ -1,0 +1,9 @@
+{
+  "statusCode": 402,
+  "body": {
+    "transaction_id": "TXN-{{randomValue type='ALPHANUMERIC' length=12}}",
+    "status": "DECLINED",
+    "reason": "Insufficient funds",
+    "timestamp": "{{now}}"
+  }
+}

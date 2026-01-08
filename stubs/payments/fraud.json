@@ -1,0 +1,15 @@
+{
+  "statusCode": 403,
+  "body": {
+    "errorType": "FraudDetectedException",
+    "errorMessage": "Transaction flagged by fraud detection",
+    "fraud_score": 95,
+    "reasons": [
+      "Unusual transaction pattern",
+      "High-risk country",
+      "Velocity check failed"
+    ],
+    "reference_id": "FRAUD-{{randomValue type='ALPHANUMERIC' length=8}}",
+    "timestamp": "{{now}}"
+  }
+}

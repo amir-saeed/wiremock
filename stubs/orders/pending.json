@@ -1,0 +1,10 @@
+{
+  "statusCode": 202,
+  "body": {
+    "order_id": "{{randomValue type='UUID'}}",
+    "status": "PENDING",
+    "message": "Order is being retried",
+    "retry_after_seconds": 30,
+    "timestamp": "{{now}}"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "statusCode": 200,
+  "body": {
+    "customer_type": "standard",
+    "discount": 0.0,
+    "perks": [],
+    "timestamp": "{{now}}"
+  }
+}

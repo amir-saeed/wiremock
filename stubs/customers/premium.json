@@ -1,0 +1,9 @@
+{
+  "statusCode": 200,
+  "body": {
+    "customer_type": "premium",
+    "discount": 0.2,
+    "perks": ["priority_support", "fast_shipping"],
+    "timestamp": "{{now}}"
+  }
+}

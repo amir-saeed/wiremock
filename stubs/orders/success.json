@@ -1,0 +1,24 @@
+{
+  "statusCode": 200,
+  "body": {
+    "order_id": "{{randomValue type='UUID'}}",
+    "customer_id": "{{jsonPath request.body '$.customer_id'}}",
+    "status": "CONFIRMED",
+    "items": [
+      {
+        "sku": "PROD-001",
+        "quantity": 2,
+        "price": 49.99
+      }
+    ],
+    "total_amount": 99.98,
+    "currency": "USD",
+    "created_at": "{{now}}",
+    "estimated_delivery": "{{now offset='3 days'}}",
+    "tracking_number": "TRK-{{randomValue type='ALPHANUMERIC' length=10}}",
+    "metadata": {
+      "processing_time_ms": 245,
+      "warehouse": "US-EAST-1"
+    }
+  }
+}
