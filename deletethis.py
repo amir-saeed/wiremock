@@ -1,38 +1,23 @@
-import boto3
-from moto import mock_apigateway, mock_lambda
-from src.lambda_function import lambda_handler
-import zipfile
-import io
+import json
+import os
+import requests
 
-@mock_lambda
-@mock_apigateway
-def test_integration_lambda_via_apigateway(setup_wiremock):
-    # Create mock Lambda
-    client_lambda = boto3.client('lambda', region_name='us-east-1')
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, 'w') as zf:
-        zf.writestr('lambda_function.py', open('src/lambda_function.py').read())
-    zip_buffer.seek(0)
-    client_lambda.create_function(
-        FunctionName='test_lambda',
-        Runtime='python3.10',
-        Role='arn:aws:iam::123456789012:role/lambda-role',  # Dummy ARN
-        Handler='lambda_function.lambda_handler',
-        Code={'ZipFile': zip_buffer.read()}
-    )
-
-    # Create mock API Gateway
-    client_apigw = boto3.client('apigateway', region_name='us-east-1')
-    api_id = client_apigw.create_rest_api(name='test_api')['id']
-    resource_id = client_apigw.get_resources(restApiId=api_id)['items'][0]['id']
-    client_apigw.put_method(restApiId=api_id, resourceId=resource_id, httpMethod='GET', authorizationType='NONE')
-    client_apigw.put_integration(
-        restApiId=api_id, resourceId=resource_id, httpMethod='GET',
-        type='AWS_PROXY', integrationHttpMethod='POST',
-        uri=f'arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:test_lambda/invocations'
-    )
-
-    # Invoke via API Gateway simulation (or use lambda_handler directly with event)
-    event = {'httpMethod': 'GET', 'path': '/'}  # Simulate API Gateway event
-    response = lambda_handler(event, None)
-    assert response['statusCode'] == 200
+def lambda_handler(event, context):
+    # Retrieve external service URL from env (injected during testing or via Terraform)
+    external_url = os.getenv("EXTERNAL_SERVICE_URL", "https://api.example.com")
+    
+    # Simple logic: Call external API
+    try:
+        response = requests.get(f"{external_url}/data")
+        response.raise_for_status()
+        data = response.json()
+        
+        return {
+            "statusCode": 200,
+            "body": json.dumps({"message": "Success", "data": data})
+        }
+    except Exception as e:
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }
