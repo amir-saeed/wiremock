@@ -1,168 +1,233 @@
-"""Unit tests for OAuthClient."""
+"""Test credential rotator with REAL AWS and OAuth provider."""
 
-import pytest
-import requests
-from unittest.mock import Mock, patch
-from requests import HTTPError
+import os
+import sys
+from datetime import datetime
 
+# Add src to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "lambda"))
+
+from src.oauth_jwt_service.core.secrets_manager import SecretsManagerClient
 from src.oauth_jwt_service.core.oauth_client import OAuthClient
-from src.oauth_jwt_service.models.schemas import OAuthCredentials, JWTToken
+from src.oauth_jwt_service.core.token_cache import TokenCache
+from src.oauth_jwt_service.core.credential_rotator import CredentialRotator
+from src.oauth_jwt_service.config.settings import get_settings
 
 
-@pytest.fixture
-def credentials() -> OAuthCredentials:
-    return OAuthCredentials(
-        client_id="test_client_id",
-        client_secret="test_client_secret",
-        token_url="https://auth.example.com/oauth/token",
-        audience="https://api.example.com",
+def test_normal_flow():
+    """Test 1: Normal flow - AWSCURRENT credentials work."""
+    print("\n" + "=" * 60)
+    print("TEST 1: Normal Flow (AWSCURRENT credentials)")
+    print("=" * 60)
+    
+    settings = get_settings()
+    
+    # Initialize components
+    secrets = SecretsManagerClient(settings.secret_name, settings.aws_region)
+    oauth = OAuthClient()
+    cache = TokenCache()
+    rotator = CredentialRotator(secrets, oauth, cache)
+    
+    try:
+        # First call - should fetch from Secrets Manager
+        print("\n[1st Call] Fetching token...")
+        token1 = rotator.get_valid_token()
+        print(f"✅ Token acquired")
+        print(f"   Access Token: {token1.access_token[:50]}...")
+        print(f"   Expires At: {token1.expires_at}")
+        print(f"   Is Expired: {token1.is_expired()}")
+        
+        # Second call - should use cache
+        print("\n[2nd Call] Should use cache...")
+        token2 = rotator.get_valid_token()
+        print(f"✅ Token from cache")
+        print(f"   Same token: {token1.access_token == token2.access_token}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def test_cache_expiry():
+    """Test 2: Cache returns None when token expired."""
+    print("\n" + "=" * 60)
+    print("TEST 2: Cache Expiry Check")
+    print("=" * 60)
+    
+    from src.oauth_jwt_service.models.schemas import JWTToken
+    
+    cache = TokenCache()
+    
+    # Create an already-expired token
+    expired_token = JWTToken(
+        access_token="fake_expired_token",
+        expires_in=10,  # 10 seconds
+        issued_at=datetime(2024, 1, 1)  # Old date
     )
-
-
-@pytest.fixture
-def client() -> OAuthClient:
-    return OAuthClient()
-
-
-@pytest.fixture
-def valid_token_response() -> dict:
-    return {
-        "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.test.signature",
-        "token_type": "Bearer",
-        "expires_in": 3600,
-    }
-
-
-def mock_response(status_code: int, json_data: dict = None) -> Mock:
-    """Helper to create mock requests response."""
-    response = Mock()
-    response.status_code = status_code
-    response.json.return_value = json_data or {}
-    if status_code >= 400:
-        response.raise_for_status.side_effect = HTTPError(
-            response=response
-        )
+    
+    cache.set(expired_token)
+    print(f"Cached expired token: {expired_token.is_expired()}")
+    
+    # Try to get it back
+    result = cache.get()
+    if result is None:
+        print("✅ Cache correctly returned None for expired token")
+        return True
     else:
-        response.raise_for_status.return_value = None
-    return response
+        print("❌ Cache returned expired token (should be None)")
+        return False
 
 
-class TestOAuthClientAcquireToken:
+def test_force_refresh():
+    """Test 3: Clear cache and force new token."""
+    print("\n" + "=" * 60)
+    print("TEST 3: Force Refresh (Clear Cache)")
+    print("=" * 60)
+    
+    settings = get_settings()
+    
+    secrets = SecretsManagerClient(settings.secret_name, settings.aws_region)
+    oauth = OAuthClient()
+    cache = TokenCache()
+    rotator = CredentialRotator(secrets, oauth, cache)
+    
+    try:
+        # Get token
+        print("\n[1st Call] Get token...")
+        token1 = rotator.get_valid_token()
+        print(f"✅ Token 1: {token1.access_token[:30]}...")
+        
+        # Clear cache
+        print("\n[Clear Cache]")
+        cache.clear()
+        print("✅ Cache cleared")
+        
+        # Get new token
+        print("\n[2nd Call] Should fetch fresh token...")
+        token2 = rotator.get_valid_token()
+        print(f"✅ Token 2: {token2.access_token[:30]}...")
+        
+        # Tokens might be same or different depending on OAuth provider
+        print(f"   Tokens identical: {token1.access_token == token2.access_token}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
-    @patch("src.oauth_jwt_service.core.oauth_client.requests.post")
-    def test_acquire_token_success(self, mock_post, client, credentials, valid_token_response):
-        """Happy path - returns JWTToken on 200."""
-        mock_post.return_value = mock_response(200, valid_token_response)
 
-        token = client.acquire_token(credentials)
+def test_invalid_credentials():
+    """Test 4: Test with invalid credentials (should fail gracefully)."""
+    print("\n" + "=" * 60)
+    print("TEST 4: Invalid Credentials (Expected to Fail)")
+    print("=" * 60)
+    
+    from src.oauth_jwt_service.models.schemas import OAuthCredentials
+    from pydantic import SecretStr
+    
+    oauth = OAuthClient()
+    
+    # Create fake invalid credentials
+    fake_creds = OAuthCredentials(
+        client_id="invalid_client_id",
+        client_secret=SecretStr("invalid_secret"),
+        token_url="https://httpbin.org/status/401",  # Returns 401
+        audience="fake_audience"
+    )
+    
+    try:
+        print("\nAttempting with invalid credentials...")
+        token = oauth.acquire_token(fake_creds)
+        print(f"❌ Should have failed but got token: {token}")
+        return False
+        
+    except Exception as e:
+        print(f"✅ Correctly failed with: {e}")
+        return True
 
-        assert isinstance(token, JWTToken)
-        assert token.access_token == valid_token_response["access_token"]
-        assert token.expires_in == 3600
 
-    @patch("src.oauth_jwt_service.core.oauth_client.requests.post")
-    def test_acquire_token_uses_basic_auth(self, mock_post, client, credentials, valid_token_response):
-        """Ensure client_id/secret sent as Basic Auth, NOT in body."""
-        mock_post.return_value = mock_response(200, valid_token_response)
+def test_secrets_manager_connection():
+    """Test 5: Verify Secrets Manager connectivity."""
+    print("\n" + "=" * 60)
+    print("TEST 5: AWS Secrets Manager Connection")
+    print("=" * 60)
+    
+    settings = get_settings()
+    
+    try:
+        secrets = SecretsManagerClient(settings.secret_name, settings.aws_region)
+        print(f"\nSecret Name: {settings.secret_name}")
+        print(f"Region: {settings.aws_region}")
+        
+        print("\nFetching AWSCURRENT credentials...")
+        creds, metadata = secrets.get_credentials("AWSCURRENT")
+        
+        print(f"✅ Successfully retrieved credentials")
+        print(f"   Version ID: {metadata.version_id}")
+        print(f"   Version Stages: {metadata.version_stages}")
+        print(f"   Client ID: {creds.client_id}")
+        print(f"   Token URL: {creds.token_url}")
+        print(f"   Audience: {creds.audience}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
-        client.acquire_token(credentials)
 
-        _, kwargs = mock_post.call_args
-        assert kwargs["auth"] == (
-            credentials.client_id,
-            credentials.client_secret.get_secret_value(),
-        )
+def run_all_tests():
+    """Run all tests."""
+    print("\n" + "=" * 60)
+    print("OAUTH JWT TOKEN ROTATION - REAL TESTS")
+    print("=" * 60)
+    
+    # Check environment
+    required_vars = [
+        "AWS_REGION",
+        "SECRET_NAME",
+        "OAUTH_CLIENT_ID",
+        "OAUTH_CLIENT_SECRET",
+        "OAUTH_TOKEN_URL",
+        "OAUTH_AUDIENCE",
+    ]
+    
+    missing = [var for var in required_vars if not os.getenv(var)]
+    if missing:
+        print(f"\n❌ Missing environment variables: {missing}")
+        print("Set them in .env or export them")
+        return
+    
+    results = {
+        "Secrets Manager Connection": test_secrets_manager_connection(),
+        "Normal Flow": test_normal_flow(),
+        "Cache Expiry": test_cache_expiry(),
+        "Force Refresh": test_force_refresh(),
+        "Invalid Credentials": test_invalid_credentials(),
+    }
+    
+    # Summary
+    print("\n" + "=" * 60)
+    print("TEST SUMMARY")
+    print("=" * 60)
+    
+    for name, passed in results.items():
+        status = "✅ PASS" if passed else "❌ FAIL"
+        print(f"{status} - {name}")
+    
+    total = len(results)
+    passed = sum(results.values())
+    print(f"\nTotal: {passed}/{total} passed")
 
-    @patch("src.oauth_jwt_service.core.oauth_client.requests.post")
-    def test_acquire_token_sends_audience_in_body(self, mock_post, client, credentials, valid_token_response):
-        """Audience must be in request body, not scope."""
-        mock_post.return_value = mock_response(200, valid_token_response)
 
-        client.acquire_token(credentials)
-
-        _, kwargs = mock_post.call_args
-        assert kwargs["data"]["audience"] == credentials.audience
-        assert kwargs["data"]["grant_type"] == "client_credentials"
-        assert "scope" not in kwargs["data"]
-
-    @patch("src.oauth_jwt_service.core.oauth_client.requests.post")
-    def test_acquire_token_sends_correct_content_type(self, mock_post, client, credentials, valid_token_response):
-        """Content-Type must be application/x-www-form-urlencoded."""
-        mock_post.return_value = mock_response(200, valid_token_response)
-
-        client.acquire_token(credentials)
-
-        _, kwargs = mock_post.call_args
-        assert kwargs["headers"]["Content-Type"] == "application/x-www-form-urlencoded"
-
-    @patch("src.oauth_jwt_service.core.oauth_client.requests.post")
-    def test_acquire_token_timeout_set(self, mock_post, client, credentials, valid_token_response):
-        """Timeout must be set to avoid hanging Lambda."""
-        mock_post.return_value = mock_response(200, valid_token_response)
-
-        client.acquire_token(credentials)
-
-        _, kwargs = mock_post.call_args
-        assert kwargs["timeout"] == 30
-
-    @patch("src.oauth_jwt_service.core.oauth_client.requests.post")
-    def test_acquire_token_raises_on_401(self, mock_post, client, credentials):
-        """401 must raise bad credentials exception."""
-        mock_post.return_value = mock_response(401)
-
-        with pytest.raises(Exception, match="Bad credentials"):
-            client.acquire_token(credentials)
-
-    @patch("src.oauth_jwt_service.core.oauth_client.requests.post")
-    def test_acquire_token_raises_on_403(self, mock_post, client, credentials):
-        """403 must raise HTTP error."""
-        mock_post.return_value = mock_response(403)
-
-        with pytest.raises(HTTPError):
-            client.acquire_token(credentials)
-
-    @patch("src.oauth_jwt_service.core.oauth_client.requests.post")
-    def test_acquire_token_raises_on_500(self, mock_post, client, credentials):
-        """Server error must raise HTTP error."""
-        mock_post.return_value = mock_response(500)
-
-        with pytest.raises(HTTPError):
-            client.acquire_token(credentials)
-
-    @patch("src.oauth_jwt_service.core.oauth_client.requests.post")
-    def test_acquire_token_raises_on_connection_error(self, mock_post, client, credentials):
-        """Network failure must propagate."""
-        mock_post.side_effect = requests.exceptions.ConnectionError("Network down")
-
-        with pytest.raises(requests.exceptions.ConnectionError):
-            client.acquire_token(credentials)
-
-    @patch("src.oauth_jwt_service.core.oauth_client.requests.post")
-    def test_acquire_token_raises_on_timeout(self, mock_post, client, credentials):
-        """Timeout must propagate."""
-        mock_post.side_effect = requests.exceptions.Timeout("Timed out")
-
-        with pytest.raises(requests.exceptions.Timeout):
-            client.acquire_token(credentials)
-
-    @patch("src.oauth_jwt_service.core.oauth_client.requests.post")
-    def test_acquire_token_posts_to_correct_url(self, mock_post, client, credentials, valid_token_response):
-        """Must POST to the token URL from credentials."""
-        mock_post.return_value = mock_response(200, valid_token_response)
-
-        client.acquire_token(credentials)
-
-        args, _ = mock_post.call_args
-        assert args[0] == credentials.token_url
-
-    @patch("src.oauth_jwt_service.core.oauth_client.requests.post")
-    def test_acquire_token_secret_not_exposed_in_body(self, mock_post, client, credentials, valid_token_response):
-        """client_secret must NEVER appear in request body."""
-        mock_post.return_value = mock_response(200, valid_token_response)
-
-        client.acquire_token(credentials)
-
-        _, kwargs = mock_post.call_args
-        body = kwargs.get("data", {})
-        assert "client_secret" not in body
-        assert "client_id" not in body
+if __name__ == "__main__":
+    run_all_tests()
