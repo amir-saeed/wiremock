@@ -1,22 +1,23 @@
-# --- CONFIGURATION ---
-$projectName = "sira-integration"
-$sourceDir = Join-Path $root "sira-integration" # Folder containing config, core, etc.
+# --- PATH CONFIGURATION ---
+$root = Get-Location
 $stagingDir = Join-Path $root "temp_package"
+# Points to where your 'config', 'core', 'models', and 'function.py' live
+$sourceDir = Join-Path $root "sira-integration" 
 $zipName = "lambda_deploy.zip"
 
 Write-Host "🚀 Starting Production Build for AWS Lambda (Python 3.12)..." -ForegroundColor Cyan
 
-# 1. Clean up previous builds
+# 1. Clean previous build data
 if (Test-Path $stagingDir) { Remove-Item -Recurse -Force $stagingDir }
 if (Test-Path $zipName) { Remove-Item $zipName }
 New-Item -ItemType Directory -Path $stagingDir | Out-Null
 
-# 2. Export Poetry dependencies to requirements.txt
+# 2. Export Poetry dependencies
 Write-Host "📦 Exporting Poetry lock file..." -ForegroundColor Yellow
 poetry export -f requirements.txt --output requirements.txt --without-hashes
 
-# 3. Install Linux-compatible dependencies via Poetry's Pip
-Write-Host "🐧 Fetching Linux-compatible wheels (manylinux)..." -ForegroundColor Yellow
+# 3. Download Linux-compatible binaries
+Write-Host "🐧 Downloading Linux-compatible wheels (manylinux)..." -ForegroundColor Yellow
 poetry run pip install `
     --platform manylinux2014_x86_64 `
     --implementation cp `
@@ -28,27 +29,41 @@ poetry run pip install `
     -r requirements.txt
 
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "Pip failed to fetch Linux binaries. Check if a dependency lacks a Wheel."
+    Write-Error "Pip failed. Check your network or if a dependency lacks a Wheel."
     exit $LASTEXITCODE
 }
 
-# 4. Copy your project code into the staging area
+# 4. Copy your project code into the staging folder
 Write-Host "📂 Merging project source code..." -ForegroundColor Yellow
-# This copies everything inside sira-integration/sira-integration (config, core, etc.)
-# directly into the root of the package.
-Copy-Item -Path "$sourceDir\*" -Destination $stagingDir -Recurse -Force
+if (Test-Path $sourceDir) {
+    Copy-Item -Path "$sourceDir\*" -Destination $stagingDir -Recurse -Force
+} else {
+    Write-Error "Source directory not found at $sourceDir!"
+    exit 1
+}
 
-# 5. Cleanup junk files to keep the ZIP small
-Write-Host "🧹 Cleaning up cache files..." -ForegroundColor Gray
-Get-ChildItem -Path $stagingDir -Include "__pycache__", "*.dist-info", "*.pyc" -Recurse | Remove-Item -Recurse -Force
+# 5. FIX: Ensure all subdirectories have __init__.py for imports
+Write-Host "🛠️ Ensuring __init__.py files exist..." -ForegroundColor Yellow
+Get-ChildItem -Path $stagingDir -Directory -Recurse | ForEach-Object {
+    $initFile = Join-Path $_.FullName "__init__.py"
+    if (-not (Test-Path $initFile)) {
+        New-Item -Path $initFile -ItemType "file" | Out-Null
+        Write-Host "   Created: $($_.Name)/__init__.py" -ForegroundColor Gray
+    }
+}
 
-# 6. Create the final ZIP
-Write-Host "🤐 Creating $zipName..." -ForegroundColor Green
-$currentDir = Get-Location
+# 6. Cleanup cache files and requirements
+Write-Host "🧹 Cleaning up junk files..." -ForegroundColor Gray
+Get-ChildItem -Path $stagingDir -Include "__pycache__", "*.pyc", "*.dist-info" -Recurse | Remove-Item -Recurse -Force
+if (Test-Path "requirements.txt") { Remove-Item "requirements.txt" }
+
+# 7. Create the final ZIP
+Write-Host "🤐 Zipping contents..." -ForegroundColor Green
 Set-Location $stagingDir
 Compress-Archive -Path * -DestinationPath "..\\$zipName" -Force
-Set-Location $currentDir
+Set-Location $root
 
-Write-Host "`n✅ SUCCESS!" -ForegroundColor Green
-Write-Host "Upload: $zipName"
-Write-Host "AWS Handler Setting: sira-integration.config.function.lambda_handler" -ForegroundColor Magenta
+Write-Host "`n✅ SUCCESS! $zipName is ready." -ForegroundColor Green
+Write-Host "------------------------------------------------"
+Write-Host "AWS HANDLER SETTING: function.lambda_handler" -ForegroundColor Magenta
+Write-Host "------------------------------------------------"
