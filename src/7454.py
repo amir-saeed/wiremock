@@ -1,206 +1,131 @@
-"""Unit tests for credential rotator - focus on rotation logic."""
+def test_expired_l1_cache_falls_through_to_oauth(
+    rotator, mock_secrets, mock_oauth, token_cache, fake_creds, fake_token
+):
+    """Test 9: Expired L1 token → cache.get() returns None → OAuth called."""
+    expired = JWTToken(access_token="expired.token", expires_in=-1)
+    token_cache.set(expired)
 
-import pytest
-from unittest.mock import Mock
-from datetime import datetime, timezone
+    # Confirm cache considers it invalid
+    assert token_cache.get() is None
 
-from src.oauth_jwt_service.core.credential_rotator import CredentialRotator
-from src.oauth_jwt_service.core.token_cache import TokenCache
-from src.oauth_jwt_service.models.schemas import JWTToken, OAuthCredentials
-from pydantic import SecretStr
-
-
-@pytest.fixture
-def mock_secrets():
-    return Mock()
-
-
-@pytest.fixture
-def mock_oauth():
-    return Mock()
-
-
-@pytest.fixture
-def token_cache():
-    return TokenCache()
-
-
-@pytest.fixture
-def rotator(mock_secrets, mock_oauth, token_cache):
-    return CredentialRotator(mock_secrets, mock_oauth, token_cache)
-
-
-@pytest.fixture
-def fake_creds():
-    return OAuthCredentials(
-        client_id="test_id",
-        client_secret=SecretStr("test_secret"),
-        token_url="https://auth.test.com/token",
-        audience="https://api.test.com",
-    )
-
-
-@pytest.fixture
-def fake_token():
-    return JWTToken(access_token="valid.jwt.token", expires_in=3600)
-
-
-# ══════════════════════════════════════════════════════════════════
-# SIMPLE TESTS
-# ══════════════════════════════════════════════════════════════════
-
-def test_l1_cache_hit(rotator, token_cache, fake_token):
-    """Test 1: Token in L1 cache - no Secrets Manager or OAuth calls."""
-    token_cache.set(fake_token)
-    
-    result = rotator.get_valid_token()
-    
-    assert result.access_token == "valid.jwt.token"
-    rotator.secrets.get_cached_jwt.assert_not_called()
-    rotator.oauth.acquire_token.assert_not_called()
-
-
-def test_l2_cache_hit(rotator, mock_secrets, fake_creds, token_cache):
-    """Test 2: Token in Secrets Manager cache - OAuth not called."""
-    mock_secrets.get_cached_jwt.return_value = "cached.jwt.token"
-    mock_secrets.get_credentials.return_value = (fake_creds, "v1")
-    fake_creds.cached_jwt_expires_at = 9999999999  # far future
-    
-    result = rotator.get_valid_token()
-    
-    assert result.access_token == "cached.jwt.token"
-    rotator.oauth.acquire_token.assert_not_called()
-    # But L1 cache should now be populated
-    cached = token_cache.get()
-    assert cached.access_token == "cached.jwt.token"
-
-
-def test_normal_oauth_flow(rotator, mock_secrets, mock_oauth, fake_creds, fake_token):
-    """Test 3: Normal flow - AWSCURRENT credentials work."""
     mock_secrets.get_cached_jwt.return_value = None
     mock_secrets.get_credentials.return_value = (fake_creds, "v1")
     mock_oauth.acquire_token.return_value = fake_token
-    
+
     result = rotator.get_valid_token()
-    
+
     assert result.access_token == "valid.jwt.token"
-    mock_oauth.acquire_token.assert_called_once_with(fake_creds)
-    mock_secrets.store_jwt.assert_called_once()
+    mock_oauth.acquire_token.assert_called_once()
 
 
-# ══════════════════════════════════════════════════════════════════
-# ROTATION TESTS (HARDER)
-# ══════════════════════════════════════════════════════════════════
-
-def test_rotation_awscurrent_fails_awspending_succeeds(
+def test_acquire_token_called_with_correct_credentials(
     rotator, mock_secrets, mock_oauth, fake_creds, fake_token
 ):
-    """Test 4: AWSCURRENT fails (401) → AWSPENDING works → promotes."""
-    # L1 and L2 cache empty
-    mock_secrets.get_cached_jwt.return_value = None
-    
-    # AWSCURRENT credentials
-    mock_secrets.get_credentials.return_value = (fake_creds, "v1")
-    
-    # AWSPENDING credentials
-    pending_creds = OAuthCredentials(
-        client_id="new_id",
-        client_secret=SecretStr("new_secret"),
-        token_url="https://auth.test.com/token",
-        audience="https://api.test.com",
-    )
-    mock_secrets.get_pending_credentials.return_value = (pending_creds, "v2")
-    
-    # OAuth: AWSCURRENT fails, AWSPENDING succeeds
-    from src.oauth_jwt_service.models.exceptions import BadCredentialsError
-    mock_oauth.acquire_token.side_effect = [
-        BadCredentialsError("401"),  # AWSCURRENT fails
-        fake_token                   # AWSPENDING works
-    ]
-    
-    result = rotator.get_valid_token()
-    
-    # Verify rotation happened
-    assert result.access_token == "valid.jwt.token"
-    assert mock_oauth.acquire_token.call_count == 2
-    mock_secrets.promote_pending_to_current.assert_called_once_with("v2")
-    mock_secrets.store_jwt.assert_called_once()
-
-
-def test_rotation_no_awspending_exists(rotator, mock_secrets, mock_oauth, fake_creds):
-    """Test 5: AWSCURRENT fails but no AWSPENDING → raises exception."""
+    """Test 10: OAuth is called with AWSCURRENT credentials, not pending ones."""
     mock_secrets.get_cached_jwt.return_value = None
     mock_secrets.get_credentials.return_value = (fake_creds, "v1")
-    mock_secrets.get_pending_credentials.return_value = None  # No AWSPENDING
-    
-    from src.oauth_jwt_service.models.exceptions import BadCredentialsError
-    mock_oauth.acquire_token.side_effect = BadCredentialsError("401")
-    
-    with pytest.raises(Exception, match="no AWSPENDING"):
-        rotator.get_valid_token()
+    mock_oauth.acquire_token.return_value = fake_token
+
+    rotator.get_valid_token()
+
+    mock_oauth.acquire_token.assert_called_once_with(fake_creds)
 
 
-def test_rotation_both_credentials_fail(rotator, mock_secrets, mock_oauth, fake_creds):
-    """Test 6: Both AWSCURRENT and AWSPENDING credentials are invalid."""
+def test_promote_not_called_on_successful_awscurrent(
+    rotator, mock_secrets, mock_oauth, fake_creds, fake_token
+):
+    """Test 11: Happy path — promote_pending_to_current must NEVER be called."""
     mock_secrets.get_cached_jwt.return_value = None
     mock_secrets.get_credentials.return_value = (fake_creds, "v1")
-    
-    pending_creds = OAuthCredentials(
-        client_id="new_id",
-        client_secret=SecretStr("new_secret"),
-        token_url="https://auth.test.com/token",
-        audience="https://api.test.com",
-    )
-    mock_secrets.get_pending_credentials.return_value = (pending_creds, "v2")
-    
-    from src.oauth_jwt_service.models.exceptions import BadCredentialsError
-    mock_oauth.acquire_token.side_effect = BadCredentialsError("401")  # Always fails
-    
-    with pytest.raises(Exception, match="Both AWSCURRENT and AWSPENDING"):
-        rotator.get_valid_token()
+    mock_oauth.acquire_token.return_value = fake_token
 
+    rotator.get_valid_token()
 
-def test_network_error_does_not_trigger_rotation(rotator, mock_secrets, mock_oauth, fake_creds):
-    """Test 7: Network error (not 401) → does NOT try rotation."""
-    mock_secrets.get_cached_jwt.return_value = None
-    mock_secrets.get_credentials.return_value = (fake_creds, "v1")
-    
-    # Network timeout - not a 401
-    mock_oauth.acquire_token.side_effect = Exception("Connection timeout")
-    
-    with pytest.raises(Exception, match="Connection timeout"):
-        rotator.get_valid_token()
-    
-    # Should NOT call get_pending_credentials (no rotation attempted)
+    mock_secrets.promote_pending_to_current.assert_not_called()
     mock_secrets.get_pending_credentials.assert_not_called()
 
 
-def test_token_stored_in_both_caches_after_rotation(
-    rotator, mock_secrets, mock_oauth, fake_creds, fake_token, token_cache
+def test_store_jwt_always_uses_awscurrent_stage(
+    rotator, mock_secrets, mock_oauth, fake_creds, fake_token
 ):
-    """Test 8: After rotation, token is stored in L1 + L2."""
+    """Test 12: store_jwt stage is always 'AWSCURRENT', even after rotation."""
     mock_secrets.get_cached_jwt.return_value = None
     mock_secrets.get_credentials.return_value = (fake_creds, "v1")
-    
-    pending_creds = OAuthCredentials(
-        client_id="new_id",
-        client_secret=SecretStr("new_secret"),
-        token_url="https://auth.test.com/token",
-        audience="https://api.test.com",
-    )
-    mock_secrets.get_pending_credentials.return_value = (pending_creds, "v2")
-    
-    from src.oauth_jwt_service.models.exceptions import BadCredentialsError
-    mock_oauth.acquire_token.side_effect = [BadCredentialsError("401"), fake_token]
-    
-    result = rotator.get_valid_token()
-    
-    # L1 cache populated
+    mock_oauth.acquire_token.return_value = fake_token
+
+    rotator.get_valid_token()
+
+    _, kwargs = mock_secrets.store_jwt.call_args
+    assert kwargs["stage"] == "AWSCURRENT"
+
+
+def test_l1_cache_populated_after_normal_oauth_flow(
+    rotator, mock_secrets, mock_oauth, fake_creds, fake_token, token_cache
+):
+    """Test 13: After normal OAuth, L1 cache is populated for next call."""
+    mock_secrets.get_cached_jwt.return_value = None
+    mock_secrets.get_credentials.return_value = (fake_creds, "v1")
+    mock_oauth.acquire_token.return_value = fake_token
+
+    rotator.get_valid_token()
+
+    # Second call must hit L1 — OAuth not called again
+    rotator.get_valid_token()
+
+    assert mock_oauth.acquire_token.call_count == 1
     assert token_cache.get().access_token == "valid.jwt.token"
-    
-    # L2 cache populated
-    mock_secrets.store_jwt.assert_called_once_with(
-        token="valid.jwt.token",
-        expires_at=fake_token.expires_at_unix(),
-        stage="AWSCURRENT",
+
+
+def test_aws_client_error_throttling_does_not_trigger_rotation(
+    rotator, mock_secrets, mock_oauth, fake_creds
+):
+    """Test 14: AWS ThrottlingException bubbles up — rotation must NOT happen."""
+    mock_secrets.get_cached_jwt.return_value = None
+    mock_secrets.get_credentials.return_value = (fake_creds, "v1")
+    mock_oauth.acquire_token.side_effect = ClientError(
+        {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
+        "AcquireToken",
     )
+
+    with pytest.raises(ClientError):
+        rotator.get_valid_token()
+
+    mock_secrets.get_pending_credentials.assert_not_called()
+    mock_secrets.promote_pending_to_current.assert_not_called()
+
+
+def test_rotation_uses_pending_credentials_not_current(
+    rotator, mock_secrets, mock_oauth, fake_creds, pending_creds, fake_token
+):
+    """Test 15: During rotation, OAuth is called with AWSPENDING creds, not AWSCURRENT."""
+    mock_secrets.get_cached_jwt.return_value = None
+    mock_secrets.get_credentials.return_value = (fake_creds, "v1")
+    mock_secrets.get_pending_credentials.return_value = (pending_creds, "v2")
+    mock_oauth.acquire_token.side_effect = [
+        BadCredentialsError("Bad credentials: 401"),
+        fake_token,
+    ]
+
+    rotator.get_valid_token()
+
+    # First call → fake_creds (AWSCURRENT), second → pending_creds (AWSPENDING)
+    assert mock_oauth.acquire_token.call_args_list == [
+        call(fake_creds),
+        call(pending_creds),
+    ]
+
+
+def test_store_jwt_expires_at_matches_token(
+    rotator, mock_secrets, mock_oauth, fake_creds, fake_token
+):
+    """Test 16: expires_at stored in Secrets Manager matches token.expires_at_unix()."""
+    mock_secrets.get_cached_jwt.return_value = None
+    mock_secrets.get_credentials.return_value = (fake_creds, "v1")
+    mock_oauth.acquire_token.return_value = fake_token
+
+    rotator.get_valid_token()
+
+    _, kwargs = mock_secrets.store_jwt.call_args
+    assert kwargs["token"]      == fake_token.access_token
+    assert kwargs["expires_at"] == fake_token.expires_at_unix()
+    assert kwargs["expires_at"] > 0
