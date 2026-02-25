@@ -1,18 +1,20 @@
-def test_client_error_non_auth_code_bubbles_up(
-    rotator, mock_secrets, mock_oauth, fake_creds
+@pytest.mark.parametrize("error_code", ["UnauthorizedException", "AccessDeniedException"])
+def test_client_error_auth_codes_trigger_rotation(
+    rotator, mock_secrets, mock_oauth, fake_creds, fake_token, error_code
 ):
-    """Test: ClientError with non-auth code (e.g. InternalServerError) 
-    must re-raise — NOT rotate."""
+    """Test: ClientError with auth error codes must rotate to AWSPENDING."""
     mock_secrets.get_cached_jwt.return_value = None
     mock_secrets.get_credentials.return_value = (fake_creds, "v1")
-    mock_oauth.acquire_token.side_effect = ClientError(
-        {"Error": {"Code": "InternalServerError", "Message": "AWS blew up"}},
-        "AcquireToken",
-    )
+    mock_secrets.get_pending_credentials.return_value = (fake_creds, "v2")
+    mock_oauth.acquire_token.side_effect = [
+        ClientError(
+            {"Error": {"Code": error_code, "Message": "Auth failed"}},
+            "AcquireToken",
+        ),
+        fake_token,
+    ]
 
-    with pytest.raises(ClientError) as exc_info:
-        rotator.get_valid_token()
+    result = rotator.get_valid_token()
 
-    assert exc_info.value.response["Error"]["Code"] == "InternalServerError"
-    mock_secrets.get_pending_credentials.assert_not_called()
-    mock_secrets.promote_pending_to_current.assert_not_called()
+    assert result.access_token == "valid.jwt.token"
+    mock_secrets.promote_pending_to_current.assert_called_once_with("v2")
