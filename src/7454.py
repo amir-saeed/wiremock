@@ -1,65 +1,215 @@
-Test 1 — L1 Cache Hit
-The token already exists in the in-memory cache from a previous call. The rotator must return it immediately without making any calls to Secrets Manager or the OAuth server. Validates that the fastest path works correctly and no unnecessary network calls are made.
+"""
+Critical unit tests for SecretsManagerClient.
 
-Test 2 — L2 Cache Hit (Secrets Manager)
-No token exists in memory, but a valid JWT is stored inside Secrets Manager. The rotator must retrieve it, skip OAuth entirely, and populate the in-memory cache for future calls. Confirms the second-tier cache layer works as a fallback before reaching the OAuth server.
+Covers the six highest-risk paths: JWT cache expiry boundary, token refresh
+buffer, credential preservation during JWT writes, correct Secrets Manager
+call arguments, AWSPENDING promotion integrity, and graceful None return
+when no pending version exists.
+"""
 
-Test 3 — Normal OAuth Flow
-Both caches are empty, so the rotator must call OAuth using the current AWSCURRENT credentials and receive a fresh token. The token must then be stored in both L1 and L2. Validates the standard happy-path acquisition works end to end.
+import json
+import time
+from unittest.mock import Mock, call, patch
 
-Test 4 — AWSCURRENT Fails, AWSPENDING Succeeds
-The AWSCURRENT credentials are rejected with a 401, triggering the rotation logic. The rotator must fall back to AWSPENDING credentials, acquire a token successfully, and promote AWSPENDING to become the new AWSCURRENT. Validates the core rotation flow works correctly under a credential failure.
+import pytest
+from botocore.exceptions import ClientError
 
-Test 5 — Rotation with No AWSPENDING Available
-AWSCURRENT credentials fail but no AWSPENDING secret has been configured in Secrets Manager. The rotator must raise a meaningful exception rather than silently failing or entering an infinite loop. Confirms the system fails loudly and clearly when rotation is not set up.
+from src.oauth_jwt_service.service.secret_manager_client import SecretsManagerClient
+from src.oauth_jwt_service.models.schemas import OAuthCredentials
+from src.oauth_jwt_service.config.env import TOKEN_REFRESH_IN_SECONDS
 
-Test 6 — Both AWSCURRENT and AWSPENDING Fail
-Both credential sets are invalid and OAuth rejects all acquisition attempts. The rotator must raise an informative exception that clearly identifies both credential stages failed. Ensures no partial side effects such as promotion or token storage occur in a total failure scenario.
 
-Test 7 — Network Error Does Not Trigger Rotation
-A non-authentication error such as a connection timeout occurs during OAuth. The rotator must re-raise it immediately without attempting rotation, since the failure is infrastructure-related, not credential-related. Prevents false rotations that would corrupt a perfectly valid secret.
+# ══════════════════════════════════════════════════════════════════
+# Fixtures
+# ══════════════════════════════════════════════════════════════════
 
-Test 8 — Token Stored in Both Caches After Rotation
-After a successful rotation, the new token must be written to both the in-memory L1 cache and Secrets Manager L2 cache. Validates the correct token value, expiry, and stage are persisted. Ensures subsequent calls are served from cache rather than triggering OAuth again.
+SECRET_NAME = "sira/oauth/test-secret"
 
-Test 9 — Expired L1 Cache Falls Through to OAuth
-An expired token is present in the in-memory cache, but TokenCache.get() correctly returns None for it. The rotator must detect this, bypass the stale entry, and proceed to acquire a fresh token via OAuth. Validates that expiry logic in the cache layer is respected by the rotator.
+BASE_CREDS: dict = {
+    "client_id":     "test_client_id",
+    "client_secret": "test_client_secret",
+    "token_url":     "https://auth.test.com/token",
+    "audience":      "https://api.test.com",
+}
 
-Test 10 — OAuth Called with Correct Credentials
-Confirms the exact OAuthCredentials object retrieved from AWSCURRENT is passed directly to acquire_token. Prevents subtle bugs where the wrong credentials object, a mock, or stale data could be forwarded. Validates the wiring between the secrets layer and the OAuth layer is precise.
 
-Test 11 — Promote Never Called on Successful Flow
-When AWSCURRENT credentials work without issue, the rotator must never call get_pending_credentials or promote_pending_to_current. Validates that the rotation path is completely isolated from the happy path. Prevents accidental version promotions that would silently overwrite a working secret.
+def _secret_response(extra: dict | None = None, version_id: str = "v-001") -> dict:
+    """Build a minimal Secrets Manager get_secret_value response."""
+    payload = {**BASE_CREDS, **(extra or {})}
+    return {
+        "SecretString": json.dumps(payload),
+        "VersionId":    version_id,
+    }
 
-Test 12 — store_jwt Always Uses AWSCURRENT Stage
-After any successful token acquisition, the JWT must be persisted back to Secrets Manager using the AWSCURRENT stage, never any other. Validates the stage argument is hardcoded correctly and cannot drift. Acts as a regression guard against accidental writes to the wrong secret version.
 
-Test 13 — L1 Cache Populated After Normal Flow
-After the first successful OAuth call, the token must be stored in L1 so that the second call is served entirely from memory. Confirms acquire_token is called exactly once across two consecutive invocations. Validates the caching contract that protects the OAuth server from repeated requests.
+def _client_error(code: str) -> ClientError:
+    return ClientError(
+        {"Error": {"Code": code, "Message": "mocked error"}},
+        "SecretsManager",
+    )
 
-Test 14 — AWS ThrottlingException Does Not Trigger Rotation
-A ThrottlingException from AWS is an infrastructure rate-limit error, not an authentication failure. The rotator must re-raise it without touching AWSPENDING credentials or attempting promotion. Prevents the system from corrupting a valid secret simply because AWS was temporarily rate-limiting requests.
 
-Test 15 — Rotation Uses Pending Credentials, Not Current
-During rotation, the first OAuth call must use AWSCURRENT credentials and the second must use AWSPENDING credentials in that exact order. Validates the call sequence and argument correctness using call_args_list. Prevents a bug where both calls accidentally use the same failing credentials.
+@pytest.fixture
+def mock_boto_client() -> Mock:
+    return Mock()
 
-Test 16 — store_jwt Expires At Matches Token
-The expires_at value written to Secrets Manager must exactly match the value returned by token.expires_at_unix() and must be a positive future timestamp. Validates there is no off-by-one error or unit mismatch between the token model and what is persisted. Ensures cache invalidation timing is consistent across both cache layers.
 
-Test 17 — Non-Auth ClientError Bubbles Up
-A ClientError with a non-authentication code such as InternalServerError must be re-raised immediately without triggering rotation. Validates that the if error_code in {...} guard correctly distinguishes infrastructure errors from credential errors. Confirms line 62 is reachable and the raise path works correctly.
+@pytest.fixture
+def secrets_client(mock_boto_client: Mock) -> SecretsManagerClient:
+    with patch("boto3.client", return_value=mock_boto_client):
+        client = SecretsManagerClient()
+        client.secret_name = SECRET_NAME
+        return client
 
-Test 18 — Auth ClientError Codes Trigger Rotation
-A ClientError carrying either UnauthorizedException or AccessDeniedException must be treated as a credential failure and trigger the AWSPENDING rotation flow. Parametrized to cover both codes in a single test. Validates the error_code branch guard correctly routes auth failures into rotation.
 
-Test 19 — BadCredentialsError Caught by ClientError Block
-Since BadCredentialsError is a subclass of ClientError, it must be caught by the except ClientError block and route correctly into rotation. Validates the exception inheritance hierarchy is wired in the right order. Confirms that the except block ordering does not cause auth errors to be silently swallowed or misrouted.
+# ══════════════════════════════════════════════════════════════════
+# CRITICAL TESTS
+# ══════════════════════════════════════════════════════════════════
 
-Test 20 — Promote Fails Mid-Rotation, No Partial State
-OAuth succeeds with AWSPENDING credentials but the subsequent call to promote_pending_to_current raises a ClientError. Neither the L1 cache nor Secrets Manager must be written to, leaving the system in a clean state. Prevents a dangerous partial rotation where a new token is cached against a secret version that was never officially promoted.
+def test_get_cached_jwt_returns_none_when_past_expiry(
+    secrets_client: SecretsManagerClient,
+    mock_boto_client: Mock,
+) -> None:
+    """
+    Validates that an already-expired JWT is never served to callers.
+    A past expiry timestamp must cause get_cached_jwt to return None,
+    preventing expired tokens from reaching OAuth-protected APIs.
+    """
+    # Arrange — JWT expired 60 seconds ago
+    expired_at = int(time.time()) - 60
+    mock_boto_client.get_secret_value.return_value = _secret_response(
+        extra={"cached_jwt": "expired.jwt.token", "cached_jwt_expires_at": expired_at}
+    )
 
-Test 21 — store_jwt Failure Leaves Token in L1 Only
-OAuth succeeds and the token is written to L1 memory cache, but the subsequent store_jwt call to Secrets Manager throws an exception. The rotator must surface the error while L1 remains populated. Confirms that a Secrets Manager write failure does not silently succeed and that the next cold Lambda start will correctly re-acquire from OAuth rather than serving a ghost cache entry.
+    # Act
+    result = secrets_client.get_cached_jwt("AWSCURRENT")
 
-Test 22 — Sequential Calls Return Same Token from L1
-Two consecutive calls to get_valid_token must return identical tokens, with OAuth and Secrets Manager each called exactly once across both invocations. Simulates repeated Lambda invocations within the same execution environment. Validates that L1 caching correctly short-circuits all downstream calls after the first acquisition.
+    # Assert — expired token must never be returned
+    assert result is None
+
+
+def test_get_cached_jwt_returns_none_within_refresh_buffer(
+    secrets_client: SecretsManagerClient,
+    mock_boto_client: Mock,
+) -> None:
+    """
+    Validates that a token expiring within the refresh buffer window is treated
+    as expired and triggers re-acquisition before it actually expires in production.
+    This is the core rotation trigger — an off-by-one here causes live API failures.
+    """
+    # Arrange — token expires exactly at the refresh boundary (e.g. 300s from now)
+    near_expiry = int(time.time()) + TOKEN_REFRESH_IN_SECONDS - 1
+    mock_boto_client.get_secret_value.return_value = _secret_response(
+        extra={"cached_jwt": "near-expiry.jwt", "cached_jwt_expires_at": near_expiry}
+    )
+
+    # Act
+    result = secrets_client.get_cached_jwt("AWSCURRENT")
+
+    # Assert — token within buffer is treated as expired
+    assert result is None
+
+
+def test_store_jwt_preserves_original_credentials(
+    secrets_client: SecretsManagerClient,
+    mock_boto_client: Mock,
+) -> None:
+    """
+    Validates that writing a new JWT to Secrets Manager does not overwrite
+    existing credential fields such as client_id and client_secret.
+    Data loss here would cause a permanent credential lockout with no recovery path.
+    """
+    # Arrange — existing secret has full credential set
+    mock_boto_client.get_secret_value.return_value = _secret_response()
+    future_expiry = int(time.time()) + 3600
+
+    # Act
+    secrets_client.store_jwt(
+        token="new.jwt.token",
+        expires_at=future_expiry,
+        stage="AWSCURRENT",
+    )
+
+    # Assert — update_secret called with all original fields intact
+    _, kwargs = mock_boto_client.update_secret.call_args
+    stored: dict = json.loads(kwargs["SecretString"])
+    assert stored["client_id"]              == "test_client_id"
+    assert stored["client_secret"]          == "test_client_secret"
+    assert stored["cached_jwt"]             == "new.jwt.token"
+    assert stored["cached_jwt_expires_at"]  == future_expiry
+
+
+def test_store_jwt_calls_update_secret_with_correct_arguments(
+    secrets_client: SecretsManagerClient,
+    mock_boto_client: Mock,
+) -> None:
+    """
+    Validates that update_secret is called with the exact SecretId and
+    SecretString arguments required by the AWS API.
+    Incorrect arguments silently write to the wrong secret version in production.
+    """
+    # Arrange
+    mock_boto_client.get_secret_value.return_value = _secret_response()
+    future_expiry = int(time.time()) + 3600
+
+    # Act
+    secrets_client.store_jwt(
+        token="correct.jwt.token",
+        expires_at=future_expiry,
+        stage="AWSCURRENT",
+    )
+
+    # Assert — exactly one call with correct SecretId
+    mock_boto_client.update_secret.assert_called_once()
+    _, kwargs = mock_boto_client.update_secret.call_args
+    assert kwargs["SecretId"]     == SECRET_NAME
+    assert "cached_jwt" in json.loads(kwargs["SecretString"])
+
+
+def test_promote_pending_to_current_calls_correct_api_arguments(
+    secrets_client: SecretsManagerClient,
+    mock_boto_client: Mock,
+) -> None:
+    """
+    Validates that promote_pending_to_current calls update_secret_version_stage
+    with the exact SecretId, VersionStage, and MoveToVersionId arguments.
+    A wrong version id here permanently promotes the wrong credentials to AWSCURRENT.
+    """
+    # Arrange
+    version_id = "abc-version-xyz-001"
+
+    # Act
+    secrets_client.promote_pending_to_current(version_id)
+
+    # Assert — must call with exactly these three arguments, nothing else
+    mock_boto_client.update_secret_version_stage.assert_called_once_with(
+        SecretId        = SECRET_NAME,
+        VersionStage    = "AWSCURRENT",
+        MoveToVersionId = version_id,
+    )
+
+
+def test_get_pending_credentials_returns_none_when_awspending_missing(
+    secrets_client: SecretsManagerClient,
+    mock_boto_client: Mock,
+) -> None:
+    """
+    Validates that get_pending_credentials returns None gracefully when no
+    AWSPENDING version exists in Secrets Manager rather than raising an exception.
+    The CredentialRotator depends on this contract — any other return value breaks
+    the rotation guard and causes an unhandled exception mid-rotation.
+    """
+    # Arrange — AWS raises ResourceNotFoundException for missing AWSPENDING
+    mock_boto_client.get_secret_value.side_effect = _client_error(
+        "ResourceNotFoundException"
+    )
+
+    # Act
+    result = secrets_client.get_pending_credentials()
+
+    # Assert — must return None, not raise
+    assert result is None
+    mock_boto_client.get_secret_value.assert_called_once_with(
+        SecretId     = SECRET_NAME,
+        VersionStage = "AWSPENDING",
+    )
