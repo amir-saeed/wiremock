@@ -1,62 +1,71 @@
-To run this "Sira Portal" rotation manually using the AWS CLI, you need to follow the three distinct phases of your design: Manual Upload, Manual Verification, and Automatic (or Manual) Promotion.
+# tests/test_config.py
+import importlib
+import pytest
+import config
 
-Phase 1: Manual Upload (Sira's Role)
-Someone (a manager or a script) creates a new version of the secret but does not make it live yet. They attach the AWSNEXT label to it.
 
-Bash
-aws secretsmanager put-secret-value \
-    --secret-id MySecretName \
-    --secret-string '{"client_id":"939393_NEW","client_secret":"NEW_PASSWORD_XYZ"}' \
-    --version-stages AWSNEXT
-Result: You now have a "waiting room" version. AWSCURRENT still points to the old working credentials.
+REQUIRED = {"DIRA_ASJSJ": "xyz-token", "API_KEY": "sk-abc123", "SECRET": "s3cr3t"}
+FULL_ENV  = {**REQUIRED, "DATABASE_URL": "postgresql://u:p@localhost/db", "DEBUG": "true", "PORT": "9000"}
 
-Phase 2: Manual Verification (The "Test")
-Before you promote it, you should verify that the AWSNEXT version actually works. You can pull specifically that version using the staging label.
 
-Bash
-aws secretsmanager get-secret-value \
-    --secret-id MySecretName \
-    --version-stage AWSNEXT
-Action: Take these credentials and try a manual curl login. If it fails, do not proceed to Phase 3.
+@pytest.fixture(autouse=True)
+def _reload_config(monkeypatch):
+    """Re-evaluate module-level vars after each env mutation."""
+    for k, v in FULL_ENV.items():
+        monkeypatch.setenv(k, v)
+    importlib.reload(config)
+    yield
+    importlib.reload(config)
 
-Phase 3: Promotion (The Failover)
-This is what your Lambda does automatically, but you can trigger it via CLI if you need to force a rotation. You must move the AWSCURRENT label to the new version ID.
 
-1. Find the Version IDs
-First, look at the secret to see which ID has which label:
+@pytest.mark.parametrize("key,expected", [
+    ("DIRA_ASJSJ", "xyz-token"),
+    ("API_KEY",    "sk-abc123"),
+    ("SECRET",     "s3cr3t"),
+    ("DATABASE_URL", "postgresql://u:p@localhost/db"),
+])
+def test_required_vars_loaded(key: str, expected: str) -> None:
+    assert getattr(config, key) == expected
 
-Bash
-aws secretsmanager describe-secret --secret-id MySecretName --query 'VersionIdsToStages'
-2. Perform the Swap
-Assuming Version-New-ID has the AWSNEXT label and Version-Old-ID has the AWSCURRENT label:
 
-Bash
-aws secretsmanager update-secret-version-stage \
-    --secret-id MySecretName \
-    --version-stage AWSCURRENT \
-    --move-to-version-id <Version-New-ID> \
-    --remove-from-version-id <Version-Old-ID>
-Behind the scenes: AWS will now move AWSCURRENT to the new version and automatically move AWSPREVIOUS to the old version.
+@pytest.mark.parametrize("debug_val,expected", [
+    ("true",  True),
+    ("True",  True),
+    ("1",     False),  # only "true" (case-insensitive) is truthy per config logic
+    ("false", False),
+    ("",      False),
+])
+def test_debug_flag_coercion(monkeypatch, debug_val: str, expected: bool) -> None:
+    monkeypatch.setenv("DEBUG", debug_val)
+    importlib.reload(config)
+    assert config.DEBUG is expected
 
-3. Cleanup the Custom Label
-Finally, remove the AWSNEXT label so the system is ready for the next manual update:
 
-Bash
-aws secretsmanager update-secret-version-stage \
-    --secret-id MySecretName \
-    --version-stage AWSNEXT \
-    --remove-from-version-id <Version-New-ID>
-Phase 4: Toggle the Parameter Store (Optional)
-If you are using the Parameter Store "Traffic Cop" design, don't forget to update the toggle so your apps know to look at the new version.
+@pytest.mark.parametrize("port_val,expected", [
+    ("8000", 8000),
+    ("443",  443),
+])
+def test_port_is_int(monkeypatch, port_val: str, expected: int) -> None:
+    monkeypatch.setenv("PORT", port_val)
+    importlib.reload(config)
+    assert config.PORT == expected
+    assert isinstance(config.PORT, int)
 
-Bash
-aws ssm put-parameter \
-    --name "/auth/app/active_version" \
-    --value "AWSCURRENT" \
-    --type String \
-    --overwrite
-Quick Troubleshooting Command
-If you ever get confused about which version is where, run this to see a clear list of all versions and their post-it note labels:
 
-Bash
-aws secretsmanager list-secret-version-ids --secret-id MySecretName
+def test_database_url_defaults_to_sqlite(monkeypatch) -> None:
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    importlib.reload(config)
+    assert config.DATABASE_URL == "sqlite:///:memory:"
+
+
+def test_port_defaults_to_8000(monkeypatch) -> None:
+    monkeypatch.delenv("PORT", raising=False)
+    importlib.reload(config)
+    assert config.PORT == 8000
+
+
+@pytest.mark.parametrize("missing_key", REQUIRED.keys())
+def test_missing_required_var_raises(monkeypatch, missing_key: str) -> None:
+    monkeypatch.delenv(missing_key, raising=False)
+    with pytest.raises(KeyError, match=missing_key):
+        importlib.reload(config)
