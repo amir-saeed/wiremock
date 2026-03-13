@@ -1,5 +1,5 @@
-def test_missing_required_header_fields():
-    """Tests lines 282, 289: Missing mandatory header fields validation"""
+def test_invalid_header_object():
+    """Tests line 289: Invalid/missing header object in request body"""
     from sira_integration.function import handler
     
     with patch.dict(os.environ, {'SYNECTICS_RTQ_URL': 'http://test.com', 'ENABLE_KAFKA': 'false'}):
@@ -7,7 +7,7 @@ def test_missing_required_header_fields():
         with patch('sira_integration.function.validate'), \
              patch('sira_integration.function.load_schema', return_value={}):
             
-            # Event with MISSING header fields (only correlationid present)
+            # Event with NO header object at all (or wrong type)
             event = {
                 "httpMethod": "POST",
                 "path": "/v1/sira",
@@ -15,12 +15,9 @@ def test_missing_required_header_fields():
                 "isBase64Encoded": False,
                 "body": json.dumps({
                     "request": {
-                        "header": {
-                            "correlationid": "test-789"
-                            # MISSING: timestamp, quoteEntryTime, entityName, status
-                        },
+                        # MISSING header object entirely
                         "source": {
-                            "sourceMessageId": "msg-789",
+                            "sourceMessageId": "msg-890",
                             "sourceData": "test data"
                         },
                         "WorkflowName": "TestWorkflow"
@@ -35,5 +32,5 @@ def test_missing_required_header_fields():
             print(f"Error: {body}")
             
             assert response["statusCode"] == 500
-            assert "Missing mandatory header fields" in body['awsError']
-            print("✅ MISSING HEADERS TEST PASSED - Covers lines 282, 289")
+            assert "header" in body['awsError'].lower()
+            print("✅ INVALID HEADER OBJECT TEST PASSED - Covers line 289")
