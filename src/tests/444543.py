@@ -1,9 +1,15 @@
-  with patch('function.validate'), \
+# Mock SUCCESS - no exceptions
+        mock_token = MagicMock()
+        mock_token.access_token = "valid-token"
+        
+        mock_rotator = MagicMock()
+        mock_rotator.get_valid_token.return_value = mock_token  # Returns token, doesn't raise
+        mock_rotator.oauth.make_rtq_request.return_value = {"quoteId": "Q-123", "status": "approved"}
+        
+        with patch('function.validate'), \
              patch('function.load_schema', return_value={}), \
              patch('function.get_rotator', return_value=mock_rotator), \
-             patch('function.publish_to_kafka'), \
-             patch('function.build_kafka_request_payload', return_value={}), \
-             patch('function.build_kafka_response_failure_payload', return_value={}):
+             patch('function.publish_to_kafka'):
             
             event = {
                 "httpMethod": "POST",
@@ -31,5 +37,5 @@
             response = handler(event, {})
             
             print(f"Status: {response['statusCode']}")
-            assert response["statusCode"] == 502
-            print("✅ PASSED")
+            assert response["statusCode"] == 200
+            print("✅ SUCCESS TEST PASSED")
