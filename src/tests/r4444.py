@@ -1,17 +1,29 @@
+import sira_integration.function as h
+from unittest.mock import MagicMock
+import pytest
+
+
 @pytest.fixture(autouse=True)
-def _reset(monkeypatch):
+def _kafka_enabled(monkeypatch):
+    monkeypatch.setattr(h, "ENABLE_KAFKA", True)
     h.kafka_producer = None
-    monkeypatch.setattr(h, "KAFKA_BOOTSTRAP_SERVERS", "broker:9092")
-    yield
-    h.kafka_producer = None
- 
- 
-def test_get_kafka_producer_success_lines_112_113(monkeypatch):
-    """Lines 112-113: KafkaProducer constructs OK → logged + returned."""
-    fake_producer = MagicMock()
-    monkeypatch.setattr(h, "KafkaProducer", lambda **_: fake_producer)
- 
-    result = h.get_kafka_producer()
- 
-    assert result is fake_producer
-    assert h.kafka_producer is fake_producer  # cached globally
+
+
+def test_publish_send_and_flush_success_lines_132_136(monkeypatch):
+    """Lines 132-136: producer.send + flush called successfully."""
+    producer = MagicMock()
+    monkeypatch.setattr(h, "get_kafka_producer", lambda: producer)
+
+    h.publish_to_kafka("test-topic", {"data": "payload"})
+
+    producer.send.assert_called_once_with("test-topic", value={"data": "payload"})
+    producer.flush.assert_called_once_with(timeout=5)
+
+
+def test_publish_send_exception_swallowed_lines_138_139(monkeypatch):
+    """Lines 138-139: producer.send raises → swallowed, no exception propagates."""
+    producer = MagicMock()
+    producer.send.side_effect = RuntimeError("broker unavailable")
+    monkeypatch.setattr(h, "get_kafka_producer", lambda: producer)
+
+    h.publish_to_kafka("test-topic", {"data": "payload"})  # must not raise
