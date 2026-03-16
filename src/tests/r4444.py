@@ -1,13 +1,17 @@
-def test_get_rotator_cold_start(monkeypatch):
-    h._rotator = None  # ensure cold start
+@pytest.fixture(autouse=True)
+def _reset(monkeypatch):
+    h.kafka_producer = None
+    monkeypatch.setattr(h, "KAFKA_BOOTSTRAP_SERVERS", "broker:9092")
+    yield
+    h.kafka_producer = None
  
-    fake_rotator = MagicMock()
-    monkeypatch.setattr(h, "SecretsManagerClient", MagicMock())
-    monkeypatch.setattr(h, "OAuthClient", MagicMock())
-    monkeypatch.setattr(h, "TokenCache", MagicMock())
-    monkeypatch.setattr(h, "CredentialRotator", lambda **_: fake_rotator)
  
-    result = h.get_rotator()
+def test_get_kafka_producer_success_lines_112_113(monkeypatch):
+    """Lines 112-113: KafkaProducer constructs OK → logged + returned."""
+    fake_producer = MagicMock()
+    monkeypatch.setattr(h, "KafkaProducer", lambda **_: fake_producer)
  
-    assert result is fake_rotator
-    assert h._rotator is fake_rotator  # cached for next call
+    result = h.get_kafka_producer()
+ 
+    assert result is fake_producer
+    assert h.kafka_producer is fake_producer  # cached globally
