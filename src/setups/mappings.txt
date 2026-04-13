@@ -1,3 +1,46 @@
-FROM wiremock/wiremock:latest
-# Bake the mappings directly into the image to avoid volume-mount hell over TCP
-COPY mappings /home/wiremock/mappings
+import docker
+import time
+
+# 1. Connect to Podman via TCP 
+# Replace with your specific Podman TCP URI if different
+PODMAN_TCP_URI = "tcp://127.0.0.1:2375"
+
+try:
+    print(f"Connecting to Podman at {PODMAN_TCP_URI}...")
+    client = docker.DockerClient(base_url=PODMAN_TCP_URI)
+    client.ping()
+    print("Connection successful!")
+except Exception as e:
+    print(f"Failed to connect to Podman: {e}")
+    exit(1)
+
+IMAGE_TAG = "my-wiremock-custom"
+
+# 2. Build the image with mappings baked in
+print("Building custom WireMock image...")
+image, build_logs = client.images.build(path=".", tag=IMAGE_TAG)
+for log in build_logs:
+    if 'stream' in log:
+        print(log['stream'].strip())
+
+# 3. Clean up any existing container with the same name
+container_name = "wiremock-local"
+try:
+    old_container = client.containers.get(container_name)
+    print("Stopping and removing old container...")
+    old_container.stop()
+    old_container.remove()
+except docker.errors.NotFound:
+    pass
+
+# 4. Run the container
+print("Starting WireMock container...")
+container = client.containers.run(
+    IMAGE_TAG,
+    name=container_name,
+    ports={'8080/tcp': 8080},
+    detach=True
+)
+
+print(f"WireMock is running! Container ID: {container.short_id}")
+print("Test it: curl http://localhost:8080/api/test")
