@@ -1,15 +1,3 @@
-{
-  "request": {
-    "method": "GET",
-    "url": "/api/test"
-  },
-  "response": {
-    "status": 200,
-    "jsonBody": {
-      "message": "WireMock is running locally and on ECS!"
-    },
-    "headers": {
-      "Content-Type": "application/json"
-    }
-  }
-}
+FROM wiremock/wiremock:latest
+# Bake the mappings directly into the image to avoid volume-mount hell over TCP
+COPY mappings /home/wiremock/mappings
