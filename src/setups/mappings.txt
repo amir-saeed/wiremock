@@ -1,30 +1,56 @@
 import docker
-import time
+import urllib.parse
+import json
+from pathlib import Path
 
-# 1. Connect to Podman via TCP 
-# Replace with your specific Podman TCP URI if different
-PODMAN_TCP_URI = "tcp://127.0.0.1:2375"
+# --- 1. Dynamic Endpoint Discovery ---
+MAPPINGS_DIR = Path("mappings")
+discovered_endpoints = []
+
+print("Scanning for WireMock mappings...")
+if MAPPINGS_DIR.exists() and MAPPINGS_DIR.is_dir():
+    for json_file in MAPPINGS_DIR.glob("*.json"):
+        try:
+            with open(json_file, 'r') as f:
+                mapping = json.load(f)
+                req = mapping.get("request", {})
+                method = req.get("method", "ANY")
+                # WireMock allows exact URLs, path patterns, or regex. We grab whatever is defined.
+                url = req.get("url") or req.get("urlPath") or req.get("urlPattern") or "<dynamic-regex-url>"
+                
+                discovered_endpoints.append({
+                    "method": method,
+                    "url": url,
+                    "file": json_file.name
+                })
+        except Exception as e:
+            print(f"  [!] Failed to parse {json_file.name}: {e}")
+
+if not discovered_endpoints:
+    print("  [!] No valid mappings found in the 'mappings' directory.")
+else:
+    print(f"  Found {len(discovered_endpoints)} endpoints.")
+
+# --- 2. Connect to Podman ---
+PODMAN_TCP_URI = "tcp://10.72.95.111:2375"
+parsed_uri = urllib.parse.urlparse(PODMAN_TCP_URI)
+podman_host = parsed_uri.hostname or "localhost"
 
 try:
-    print(f"Connecting to Podman at {PODMAN_TCP_URI}...")
+    print(f"\nConnecting to Podman at {PODMAN_TCP_URI}...")
     client = docker.DockerClient(base_url=PODMAN_TCP_URI)
     client.ping()
-    print("Connection successful!")
 except Exception as e:
     print(f"Failed to connect to Podman: {e}")
     exit(1)
 
 IMAGE_TAG = "my-wiremock-custom"
-
-# 2. Build the image with mappings baked in
-print("Building custom WireMock image...")
-image, build_logs = client.images.build(path=".", tag=IMAGE_TAG)
-for log in build_logs:
-    if 'stream' in log:
-        print(log['stream'].strip())
-
-# 3. Clean up any existing container with the same name
 container_name = "wiremock-local"
+
+# --- 3. Build and Clean ---
+print("Building custom WireMock image with new mappings...")
+client.images.build(path=".", tag=IMAGE_TAG)
+
 try:
     old_container = client.containers.get(container_name)
     print("Stopping and removing old container...")
@@ -33,7 +59,7 @@ try:
 except docker.errors.NotFound:
     pass
 
-# 4. Run the container
+# --- 4. Run the Container ---
 print("Starting WireMock container...")
 container = client.containers.run(
     IMAGE_TAG,
@@ -42,5 +68,20 @@ container = client.containers.run(
     detach=True
 )
 
-print(f"WireMock is running! Container ID: {container.short_id}")
-print("Test it: curl http://localhost:8080/api/test")
+print(f"\n✅ WireMock is running! (Container ID: {container.short_id})\n")
+
+# --- 5. Print Smart Test Menu ---
+print("--- Available Endpoints ---")
+for ep in discovered_endpoints:
+    method = ep['method']
+    url = ep['url']
+    
+    # Format the curl command based on the method
+    curl_cmd = f"curl -X {method}"
+    if method in ["POST", "PUT", "PATCH"]:
+        curl_cmd += " -H \"Content-Type: application/json\" -d '{}'"
+    
+    curl_cmd += f" http://{podman_host}:8080{url}"
+    
+    print(f"File: {ep['file']}")
+    print(f"Test: {curl_cmd}\n")
