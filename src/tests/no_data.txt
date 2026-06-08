@@ -1,5 +1,1 @@
-
-
-
-podman exec -e AWS_DEFAULT_REGION=eu-west-1 -e ES_PASSWORD=motor_eqd -e PYTHONPATH=/tmp/glue/src:/home/glue_user/spark/python/lib/pyspark.zip:/usr/share/aws/glue/pds/PyGlue.zip glue-test2 python /tmp/glue/jobs/maintenance_job.py --RUN_ID run-local-001 --ENV local --REPORTING_DATE 2026-06-08 --ES_HOST 10.72.95.111 --ES_PORT 5432 --ES_DATABASE b4c-local-entity-store --ES_USER motor_eqd
-
+podman exec -e AWS_DEFAULT_REGION=eu-west-1 -e ES_PASSWORD=motor_eqd -e PYTHONPATH=/tmp/glue/src:/usr/share/aws/glue-pds glue-test2 python /tmp/glue/jobs/maintenance_job.py --RUN_ID run-local-001 --ENV local --REPORTING_DATE 2026-06-08 --ES_HOST 10.72.95.111 --ES_PORT 5432 --ES_DATABASE b4c-local-entity-store --ES_USER motor_eqd
