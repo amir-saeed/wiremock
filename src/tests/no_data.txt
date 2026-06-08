@@ -1,0 +1,5 @@
+podman run --rm amazon/aws-cli --endpoint-url http://10.72.95.111:9090 s3api create-bucket --bucket b4c-dal-local-data-quotes-shredded-lfs --region eu-west-1
+
+podman run --rm amazon/aws-cli --endpoint-url http://10.72.95.111:9090 s3api create-bucket --bucket b4c-dal-local-data-quote-enrichment --region eu-west-1
+
+podman run --rm amazon/aws-cli --endpoint-url http://10.72.95.111:9090 s3api list-buckets
