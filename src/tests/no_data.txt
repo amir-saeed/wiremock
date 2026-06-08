@@ -1,12 +1,1 @@
-Try using Podman machine path format:
-powershellpodman run --rm -e AWS_DEFAULT_REGION=eu-west-1 -e ES_PASSWORD=motor_eqd -v "//d/dev/src/dlg/motor-eqd/glue:/home/glue_user/workspace/app/glue" amazon/aws-glue-libs:5.0.8 python jobs/maintenance_job.py --RUN_ID run-local-001 --ENV local --REPORTING_DATE 2026-06-08 --ES_HOST 10.72.95.111 --ES_PORT 5432 --ES_DATABASE b4c-local-entity-store --ES_USER motor_eqd
-
-If that still fails, skip volume mount entirely — copy files into a running container instead:
-Step 1 — Start container and keep it running:
-powershellpodman run -d --name glue-test amazon/aws-glue-libs:5.0.8 sleep infinity
-Step 2 — Copy your glue folder in:
-powershellpodman cp "D:\dev\src\dlg\motor-eqd\glue" glue-test:/home/glue_user/workspace/app/glue
-Step 3 — Run the job:
-powershellpodman exec glue-test python /home/glue_user/workspace/app/glue/jobs/maintenance_job.py --RUN_ID run-local-001 --ENV local --REPORTING_DATE 2026-06-08 --ES_HOST 10.72.95.111 --ES_PORT 5432 --ES_DATABASE b4c-local-entity-store --ES_USER motor_eqd
-Step 4 — Clean up:
-powershellpodman stop glue-test && podman rm glue-test
+podman exec -e AWS_DEFAULT_REGION=eu-west-1 -e ES_PASSWORD=motor_eqd glue-test2 python /tmp/glue/jobs/maintenance_job.py --RUN_ID run-local-001 --ENV local --REPORTING_DATE 2026-06-08 --ES_HOST 10.72.95.111 --ES_PORT 5432 --ES_DATABASE b4c-local-entity-store --ES_USER motor_eqd
