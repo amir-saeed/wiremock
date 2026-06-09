@@ -1,3 +1,1 @@
-podman exec -e AWS_ENDPOINT_URL_S3=http://10.72.95.111:9090 glue-test2 env | findstr AWS_ENDPOINT
-
-podman exec -e AWS_DEFAULT_REGION=eu-west-1 -e ES_PASSWORD=motor_eqd -e PYTHONPATH=/tmp/glue/src:/usr/share/aws/glue-pds -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test -e AWS_ENDPOINT_URL_DYNAMODB=http://10.72.95.111:8000 -e AWS_ENDPOINT_URL_S3=http://10.72.95.111:9090 glue-test2 python /tmp/glue/jobs/maintenance_job.py --RUN_ID run-local-001 --ENV local --REPORTING_DATE 2026-06-08 --ES_HOST 10.72.95.111 --ES_PORT 5432 --ES_DATABASE b4c-local-entity-store --ES_USER motor_eqd
+podman exec -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test -e AWS_DEFAULT_REGION=eu-west-1 glue-test2 aws s3 cp /tmp/glue/src/pipelines/maintenance/__init__.py "s3://b4c-dal-local-data-quotes-shredded-lfs/quote_journey/shredded_parquet/no_lambda/B4C_REQUEST_QUOTE/dal_year=2026/dal_month=06/dal_day=08/000.parquet" --endpoint-url http://10.72.95.111:9090
