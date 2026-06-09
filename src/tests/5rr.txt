@@ -1,1 +1,5 @@
-podman exec -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test -e AWS_DEFAULT_REGION=eu-west-1 glue-test2 aws s3 cp /tmp/glue/src/pipelines/maintenance/__init__.py "s3://b4c-dal-local-data-quotes-shredded-lfs/quote_journey/shredded_parquet/no_lambda/B4C_REQUEST_QUOTE/dal_year=2026/dal_month=06/dal_day=08/000.parquet" --endpoint-url http://10.72.95.111:9090
+raw_df.filter(
+    (F.col("dal_year") == F.lit(str(reporting_date.year)))
+    & (F.col("dal_month") == F.lit(f"{reporting_date.month:02d}"))
+    & (F.col("dal_day") == F.lit(f"{reporting_date.day:02d}"))
+)
