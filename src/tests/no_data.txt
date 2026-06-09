@@ -1,3 +1,0 @@
-podman exec -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test -e AWS_DEFAULT_REGION=eu-west-1 glue-test2 aws s3 rb s3://b4c-dal-local-data-quote-enrichment --endpoint-url http://10.72.95.111:9090
-
-podman exec -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test -e AWS_DEFAULT_REGION=eu-west-1 glue-test2 aws s3 mb s3://b4c-dal-local-data-quote-enrichment --endpoint-url http://10.72.95.111:9090 --region eu-west-1
