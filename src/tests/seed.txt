@@ -1,0 +1,79 @@
+import io
+from datetime import datetime
+
+import boto3
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+REPORTING_DATE = datetime(2026, 6, 8)
+S3_ENDPOINT = "http://10.72.95.111:9090"
+BUCKET = "b4c-dal-local-data-quotes-shredded-lfs"
+KEY = (
+    "quote_journey/shredded_parquet/no_lambda/B4C_REQUEST_QUOTE"
+    "/dal_year=2026/dal_month=06/dal_day=08/000.parquet"
+)
+
+df = pd.DataFrame(
+    {
+        "correlationid": [
+            "corr-001", "corr-002", "corr-003", "corr-004", "corr-005",
+            "corr-006", "corr-007", "corr-008", "corr-009", "corr-010",
+            "corr-011", "corr-012", "corr-013", "corr-014", "corr-015",
+            "corr-016", "corr-017", "corr-018", "corr-019", "corr-020",
+            "corr-021", "corr-022", "corr-023", "corr-024", "corr-025",
+        ],
+        "channel": [
+            "web", "app", "web", "phone", "app",
+            "web", "phone", "app", "web", "app",
+            "phone", "web", "app", "web", "phone",
+            "app", "web", "app", "phone", "web",
+            "app", "web", "phone", "app", "web",
+        ],
+        "source_timestamp": [
+            datetime(2026, 6, 8,  0,  1, 0),
+            datetime(2026, 6, 8,  1,  5, 0),
+            datetime(2026, 6, 8,  2, 10, 0),
+            datetime(2026, 6, 8,  3, 15, 0),
+            datetime(2026, 6, 8,  4, 20, 0),
+            datetime(2026, 6, 8,  5, 25, 0),
+            datetime(2026, 6, 8,  6, 30, 0),
+            datetime(2026, 6, 8,  7, 35, 0),
+            datetime(2026, 6, 8,  8, 40, 0),
+            datetime(2026, 6, 8,  9, 45, 0),
+            datetime(2026, 6, 8, 10,  0, 0),
+            datetime(2026, 6, 8, 10, 15, 0),
+            datetime(2026, 6, 8, 10, 30, 0),
+            datetime(2026, 6, 8, 11,  0, 0),
+            datetime(2026, 6, 8, 11, 30, 0),
+            datetime(2026, 6, 8, 12,  0, 0),
+            datetime(2026, 6, 8, 13,  0, 0),
+            datetime(2026, 6, 8, 14,  0, 0),
+            datetime(2026, 6, 8, 15,  0, 0),
+            datetime(2026, 6, 8, 16,  0, 0),
+            datetime(2026, 6, 8, 17,  0, 0),
+            datetime(2026, 6, 8, 18,  0, 0),
+            datetime(2026, 6, 8, 20,  0, 0),
+            datetime(2026, 6, 8, 22,  0, 0),
+            datetime(2026, 6, 8, 23, 59, 0),
+        ],
+    }
+)
+
+buf = io.BytesIO()
+pq.write_table(pa.Table.from_pandas(df), buf)
+buf.seek(0)
+
+s3 = boto3.client(
+    "s3",
+    endpoint_url=S3_ENDPOINT,
+    region_name="eu-west-1",
+    aws_access_key_id="dummy",
+    aws_secret_access_key="dummy",
+)
+
+s3.put_object(Bucket=BUCKET, Key=KEY, Body=buf.read())
+
+print(f"Uploaded {len(df)} records to s3://{BUCKET}/{KEY}")
+print(f"Channels  : {df['channel'].value_counts().to_dict()}")
+print(f"Date range: {df['source_timestamp'].min()} -> {df['source_timestamp'].max()}")
