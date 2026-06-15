@@ -1,1 +1,16 @@
 podman exec glue-test2 python -c "import boto3; s3 = boto3.client('s3', endpoint_url='http://10.72.95.111:9090', aws_access_key_id='test', aws_secret_access_key='test', region_name='eu-west-1'); resp = s3.get_object(Bucket='b4c-dal-local-data-quotes-shredded-lfs', Key='quote_journey/shredded_parquet/no_lambda/B4C_REQUEST_QUOTE/dal_year=2026/dal_month=06/dal_day=08/000.parquet'); print('size:', len(resp['Body'].read()))"
+
+
+
+DELETE_QUOTES_BATCH_QUERY = sql.SQL(
+    """
+    WITH batch AS (
+        SELECT ctid
+        FROM {}
+        WHERE reporting_date::date < %s
+        LIMIT %s
+    )
+    DELETE FROM {}
+    WHERE ctid IN (SELECT ctid FROM batch)
+    """
+).format(_QUOTE_TABLE, _QUOTE_TABLE)
