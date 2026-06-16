@@ -1,3 +1,169 @@
-_awsglue_utils = SimpleNamespace(getResolvedOptions=MagicMock())
-sys.modules.setdefault("awsglue", SimpleNamespace(utils=_awsglue_utils))
-sys.modules.setdefault("awsglue.utils", _awsglue_utils)
+
+def test_parse_args_includes_optional_args_when_provided(monkeypatch) -> None:
+    full_args = {
+        **_base_args(),
+        "ES_PORT": "5433",
+        "ES_SECRET_NAME": "my-secret",
+        "DATA_RETENTION_DAYS": "730",
+    }
+    monkeypatch.setattr(
+        maintenance_job.getResolvedOptions,
+        "side_effect",
+        _make_get_resolved_options(full_args),
+    )
+
+    result = maintenance_job.parse_args()
+
+    assert result["ES_PORT"] == "5433"
+    assert result["ES_SECRET_NAME"] == "my-secret"
+    assert result["DATA_RETENTION_DAYS"] == "730"
+
+
+def test_parse_args_silently_skips_absent_optional_args(monkeypatch) -> None:
+    # Only required args — no optional keys present
+    required_only = {k: _base_args()[k] for k in maintenance_job.REQUIRED_ARGS}
+    monkeypatch.setattr(
+        maintenance_job.getResolvedOptions,
+        "side_effect",
+        _make_get_resolved_options(required_only),
+    )
+
+    result = maintenance_job.parse_args()
+
+    for key in maintenance_job.OPTIONAL_ARGS:
+        assert key not in result
+
+
+def test_parse_args_some_optional_args_present(monkeypatch) -> None:
+    """Only AWS_REGION provided among optionals — others must be silently absent."""
+    partial_args = {**_base_args(), "AWS_REGION": constants.AWS_REGION}
+    monkeypatch.setattr(
+        maintenance_job.getResolvedOptions,
+        "side_effect",
+        _make_get_resolved_options(partial_args),
+    )
+
+    result = maintenance_job.parse_args()
+
+    assert result["AWS_REGION"] == constants.AWS_REGION
+    assert "ES_PORT" not in result
+    assert "DATA_RETENTION_DAYS" not in result
+
+
+# ---------------------------------------------------------------------------
+# main() — runtime args construction
+# ---------------------------------------------------------------------------
+
+def test_main_sets_job_name_to_maintenance(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert runtime_args["job_name"] == "maintenance"
+
+
+def test_main_sets_env_from_args(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert runtime_args["env"] == "local"
+
+
+def test_main_parses_reporting_date_correctly(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert runtime_args["reporting_date"] == date(2026, 5, 12)
+
+
+def test_main_parses_execution_ts_as_utc_datetime(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert isinstance(runtime_args["execution_ts"], datetime)
+    assert runtime_args["execution_ts"].tzinfo is UTC
+    assert runtime_args["execution_ts"] == datetime(2026, 5, 12, 9, 0, 0, tzinfo=UTC)
+
+
+def test_main_default_retention_days_is_1095(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert runtime_args["data_retention_days"] == 1095
+
+
+def test_main_uses_custom_retention_days_when_provided(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch, {"DATA_RETENTION_DAYS": "730"})
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert runtime_args["data_retention_days"] == 730
+
+
+# ---------------------------------------------------------------------------
+# main() — ES config
+# ---------------------------------------------------------------------------
+
+def test_main_builds_es_config_with_defaults(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert runtime_args["es"] == {
+        "host": "localhost",
+        "port": 5432,
+        "database": "entity_store",
+        "user": "motor_eqd",
+        "secret_name": None,
+    }
+
+
+def test_main_uses_custom_es_port(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch, {"ES_PORT": "5433"})
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert runtime_args["es"]["port"] == 5433
+
+
+def test_main_passes_es_secret_name_when_provided(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch, {"ES_SECRET_NAME": "prod/es-secret"})
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert runtime_args["es"]["secret_name"] == "prod/es-secret"
+
+
+# ---------------------------------------------------------------------------
+# main() — pipeline wiring
+# ---------------------------------------------------------------------------
+
+def test_main_passes_job_context_model_from_pipeline_spec(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    mocks.load_job_context.assert_called_once_with(
+        glue_runtime_args=mocks.load_job_context.call_args.kwargs["glue_runtime_args"],
+        job_context_model=object,
+    )
+
+
+def test_main_calls_pipeline_run_with_job_context(monkeypatch) -> None:
+    job_context = MagicMock()
+    mocks = _setup_main(monkeypatch)
+    mocks.load_job_context.return_value = job_context
+
+    maintenance_job.main()
+
+    mocks.pipeline.run.assert_called_once_with(job_context)
+
+
+def test_main_instantiates_pipeline_from_spec(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    mocks.pipeline_cls.assert_called_once_with()
