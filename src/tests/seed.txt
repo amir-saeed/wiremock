@@ -1,169 +1,307 @@
+"""Tests for src/pipelines/maintenance/duplicate_check.py."""
+from datetime import date
+from unittest.mock import MagicMock, call
 
-def test_parse_args_includes_optional_args_when_provided(monkeypatch) -> None:
-    full_args = {
-        **_base_args(),
-        "ES_PORT": "5433",
-        "ES_SECRET_NAME": "my-secret",
-        "DATA_RETENTION_DAYS": "730",
-    }
+import pytest
+
+from pipelines.maintenance import duplicate_check
+from tests import constants
+from utils.exceptions import AlreadyExistsError
+
+# ---------------------------------------------------------------------------
+# Shared fixtures
+# ---------------------------------------------------------------------------
+
+REPORTING_DATE = date(2026, 5, 12)
+ENV = "local"
+DAP_BUCKET = "b4c-dal-local-data-quote-enrichment"
+
+
+def _make_dynamodb(count: int = 0) -> MagicMock:
+    """Returns a mocked DynamoDB client where every query returns Count=count."""
+    dynamodb = MagicMock()
+    dynamodb.query.return_value = {"Count": count}
+    return dynamodb
+
+
+# ---------------------------------------------------------------------------
+# check_quotes_not_exist
+# ---------------------------------------------------------------------------
+
+def test_check_quotes_not_exist_passes_when_no_quotes() -> None:
+    postgres = MagicMock()
+    postgres.has_quotes_for_reporting_date.return_value = False
+
+    duplicate_check.check_quotes_not_exist(
+        reporting_date=REPORTING_DATE,
+        postgres=postgres,
+        logger=MagicMock(),
+    )
+
+    postgres.has_quotes_for_reporting_date.assert_called_once_with(
+        reporting_date=REPORTING_DATE,
+    )
+
+
+def test_check_quotes_not_exist_raises_when_quotes_exist() -> None:
+    postgres = MagicMock()
+    postgres.has_quotes_for_reporting_date.return_value = True
+
+    with pytest.raises(AlreadyExistsError) as exc_info:
+        duplicate_check.check_quotes_not_exist(
+            reporting_date=REPORTING_DATE,
+            postgres=postgres,
+            logger=MagicMock(),
+        )
+
+    assert "2026-05-12" in str(exc_info.value)
+    assert "Re-run requires explicit cleanup first" in str(exc_info.value)
+
+
+def test_check_quotes_not_exist_error_mentions_quote_table() -> None:
+    postgres = MagicMock()
+    postgres.has_quotes_for_reporting_date.return_value = True
+
+    with pytest.raises(AlreadyExistsError) as exc_info:
+        duplicate_check.check_quotes_not_exist(
+            reporting_date=REPORTING_DATE,
+            postgres=postgres,
+            logger=MagicMock(),
+        )
+
+    assert "entity_store.quote" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# check_os_not_exist
+# ---------------------------------------------------------------------------
+
+def test_check_os_not_exist_passes_when_all_tables_empty() -> None:
+    dynamodb = _make_dynamodb(count=0)
+
+    duplicate_check.check_os_not_exist(
+        reporting_date=REPORTING_DATE,
+        dynamodb=dynamodb,
+        env=ENV,
+        logger=MagicMock(),
+    )
+
+    assert dynamodb.query.call_count == 3
+
+
+def test_check_os_not_exist_queries_all_three_vap_tables() -> None:
+    dynamodb = _make_dynamodb(count=0)
+
+    duplicate_check.check_os_not_exist(
+        reporting_date=REPORTING_DATE,
+        dynamodb=dynamodb,
+        env=ENV,
+        logger=MagicMock(),
+    )
+
+    queried_tables = [c.kwargs["TableName"] for c in dynamodb.query.call_args_list]
+    assert "b4c-local-eqd-operational-store-vehicle" in queried_tables
+    assert "b4c-local-eqd-operational-store-address" in queried_tables
+    assert "b4c-local-eqd-operational-store-person" in queried_tables
+
+
+def test_check_os_not_exist_uses_correct_gsi_name() -> None:
+    dynamodb = _make_dynamodb(count=0)
+
+    duplicate_check.check_os_not_exist(
+        reporting_date=REPORTING_DATE,
+        dynamodb=dynamodb,
+        env=ENV,
+        logger=MagicMock(),
+    )
+
+    for c in dynamodb.query.call_args_list:
+        assert c.kwargs["IndexName"] == "execution_id_index"
+
+
+def test_check_os_not_exist_uses_reporting_date_as_batch_id() -> None:
+    dynamodb = _make_dynamodb(count=0)
+
+    duplicate_check.check_os_not_exist(
+        reporting_date=REPORTING_DATE,
+        dynamodb=dynamodb,
+        env=ENV,
+        logger=MagicMock(),
+    )
+
+    for c in dynamodb.query.call_args_list:
+        assert c.kwargs["ExpressionAttributeValues"][":batch_id"] == {"S": "2026-05-12"}
+
+
+def test_check_os_not_exist_raises_when_vehicle_table_has_data() -> None:
+    dynamodb = MagicMock()
+    # First table (vehicle) returns data
+    dynamodb.query.return_value = {"Count": 1}
+
+    with pytest.raises(AlreadyExistsError) as exc_info:
+        duplicate_check.check_os_not_exist(
+            reporting_date=REPORTING_DATE,
+            dynamodb=dynamodb,
+            env=ENV,
+            logger=MagicMock(),
+        )
+
+    assert "b4c-local-eqd-operational-store-vehicle" in str(exc_info.value)
+    assert "2026-05-12" in str(exc_info.value)
+
+
+def test_check_os_not_exist_stops_on_first_table_with_data() -> None:
+    dynamodb = MagicMock()
+    # First query has data — should stop, not query remaining tables
+    dynamodb.query.return_value = {"Count": 1}
+
+    with pytest.raises(AlreadyExistsError):
+        duplicate_check.check_os_not_exist(
+            reporting_date=REPORTING_DATE,
+            dynamodb=dynamodb,
+            env=ENV,
+            logger=MagicMock(),
+        )
+
+    assert dynamodb.query.call_count == 1
+
+
+def test_check_os_not_exist_raises_when_second_table_has_data() -> None:
+    dynamodb = MagicMock()
+    dynamodb.query.side_effect = [
+        {"Count": 0},  # vehicle — passes
+        {"Count": 1},  # address — raises
+    ]
+
+    with pytest.raises(AlreadyExistsError) as exc_info:
+        duplicate_check.check_os_not_exist(
+            reporting_date=REPORTING_DATE,
+            dynamodb=dynamodb,
+            env=ENV,
+            logger=MagicMock(),
+        )
+
+    assert "b4c-local-eqd-operational-store-address" in str(exc_info.value)
+    assert dynamodb.query.call_count == 2
+
+
+def test_check_os_not_exist_error_message_contains_cleanup_hint() -> None:
+    dynamodb = _make_dynamodb(count=1)
+
+    with pytest.raises(AlreadyExistsError) as exc_info:
+        duplicate_check.check_os_not_exist(
+            reporting_date=REPORTING_DATE,
+            dynamodb=dynamodb,
+            env=ENV,
+            logger=MagicMock(),
+        )
+
+    assert "Re-run requires explicit cleanup first" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# check_dap_s3_not_exist  (imported from utils.s3, tested here as part of module)
+# ---------------------------------------------------------------------------
+
+def test_check_dap_s3_not_exist_passes_when_bucket_empty() -> None:
+    s3 = MagicMock()
+    s3.list_objects_v2.return_value = {"KeyCount": 0}
+
+    duplicate_check.check_dap_s3_not_exist(
+        reporting_date=REPORTING_DATE,
+        s3=s3,
+        bucket=DAP_BUCKET,
+        logger=MagicMock(),
+    )
+
+    s3.list_objects_v2.assert_called_once_with(
+        Bucket=DAP_BUCKET,
+        Prefix="reporting_date=2026-05-12/",
+        MaxKeys=1,
+    )
+
+
+def test_check_dap_s3_not_exist_raises_when_objects_exist() -> None:
+    s3 = MagicMock()
+    s3.list_objects_v2.return_value = {"KeyCount": 1}
+
+    with pytest.raises(AlreadyExistsError) as exc_info:
+        duplicate_check.check_dap_s3_not_exist(
+            reporting_date=REPORTING_DATE,
+            s3=s3,
+            bucket=DAP_BUCKET,
+            logger=MagicMock(),
+        )
+
+    assert "reporting_date=2026-05-12/" in str(exc_info.value)
+    assert DAP_BUCKET in str(exc_info.value)
+
+
+def test_check_dap_s3_not_exist_uses_correct_prefix_format() -> None:
+    s3 = MagicMock()
+    s3.list_objects_v2.return_value = {"KeyCount": 0}
+
+    duplicate_check.check_dap_s3_not_exist(
+        reporting_date=date(2026, 12, 1),
+        s3=s3,
+        bucket=DAP_BUCKET,
+        logger=MagicMock(),
+    )
+
+    call_kwargs = s3.list_objects_v2.call_args.kwargs
+    assert call_kwargs["Prefix"] == "reporting_date=2026-12-01/"
+
+
+# ---------------------------------------------------------------------------
+# check_downstream_not_exist
+# ---------------------------------------------------------------------------
+
+def test_check_downstream_not_exist_calls_os_and_dap_checks(monkeypatch) -> None:
+    check_os = MagicMock()
+    check_dap = MagicMock()
+    monkeypatch.setattr(duplicate_check, "check_os_not_exist", check_os)
+    monkeypatch.setattr(duplicate_check, "check_dap_s3_not_exist", check_dap)
+
+    s3 = MagicMock()
+    dynamodb = MagicMock()
+
+    duplicate_check.check_downstream_not_exist(
+        reporting_date=REPORTING_DATE,
+        dynamodb=dynamodb,
+        s3=s3,
+        env=ENV,
+        dap_bucket=DAP_BUCKET,
+        logger=MagicMock(),
+    )
+
+    check_os.assert_called_once_with(
+        reporting_date=REPORTING_DATE,
+        dynamodb=dynamodb,
+        env=ENV,
+        logger=check_os.call_args.kwargs["logger"],
+    )
+    check_dap.assert_called_once_with(
+        reporting_date=REPORTING_DATE,
+        s3=s3,
+        bucket=DAP_BUCKET,
+        logger=check_dap.call_args.kwargs["logger"],
+    )
+
+
+def test_check_downstream_not_exist_propagates_os_error(monkeypatch) -> None:
     monkeypatch.setattr(
-        maintenance_job.getResolvedOptions,
-        "side_effect",
-        _make_get_resolved_options(full_args),
+        duplicate_check,
+        "check_os_not_exist",
+        MagicMock(side_effect=AlreadyExistsError("OS data exists")),
     )
+    monkeypatch.setattr(duplicate_check, "check_dap_s3_not_exist", MagicMock())
 
-    result = maintenance_job.parse_args()
-
-    assert result["ES_PORT"] == "5433"
-    assert result["ES_SECRET_NAME"] == "my-secret"
-    assert result["DATA_RETENTION_DAYS"] == "730"
-
-
-def test_parse_args_silently_skips_absent_optional_args(monkeypatch) -> None:
-    # Only required args — no optional keys present
-    required_only = {k: _base_args()[k] for k in maintenance_job.REQUIRED_ARGS}
-    monkeypatch.setattr(
-        maintenance_job.getResolvedOptions,
-        "side_effect",
-        _make_get_resolved_options(required_only),
-    )
-
-    result = maintenance_job.parse_args()
-
-    for key in maintenance_job.OPTIONAL_ARGS:
-        assert key not in result
-
-
-def test_parse_args_some_optional_args_present(monkeypatch) -> None:
-    """Only AWS_REGION provided among optionals — others must be silently absent."""
-    partial_args = {**_base_args(), "AWS_REGION": constants.AWS_REGION}
-    monkeypatch.setattr(
-        maintenance_job.getResolvedOptions,
-        "side_effect",
-        _make_get_resolved_options(partial_args),
-    )
-
-    result = maintenance_job.parse_args()
-
-    assert result["AWS_REGION"] == constants.AWS_REGION
-    assert "ES_PORT" not in result
-    assert "DATA_RETENTION_DAYS" not in result
-
-
-# ---------------------------------------------------------------------------
-# main() — runtime args construction
-# ---------------------------------------------------------------------------
-
-def test_main_sets_job_name_to_maintenance(monkeypatch) -> None:
-    mocks = _setup_main(monkeypatch)
-    maintenance_job.main()
-
-    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
-    assert runtime_args["job_name"] == "maintenance"
-
-
-def test_main_sets_env_from_args(monkeypatch) -> None:
-    mocks = _setup_main(monkeypatch)
-    maintenance_job.main()
-
-    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
-    assert runtime_args["env"] == "local"
-
-
-def test_main_parses_reporting_date_correctly(monkeypatch) -> None:
-    mocks = _setup_main(monkeypatch)
-    maintenance_job.main()
-
-    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
-    assert runtime_args["reporting_date"] == date(2026, 5, 12)
-
-
-def test_main_parses_execution_ts_as_utc_datetime(monkeypatch) -> None:
-    mocks = _setup_main(monkeypatch)
-    maintenance_job.main()
-
-    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
-    assert isinstance(runtime_args["execution_ts"], datetime)
-    assert runtime_args["execution_ts"].tzinfo is UTC
-    assert runtime_args["execution_ts"] == datetime(2026, 5, 12, 9, 0, 0, tzinfo=UTC)
-
-
-def test_main_default_retention_days_is_1095(monkeypatch) -> None:
-    mocks = _setup_main(monkeypatch)
-    maintenance_job.main()
-
-    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
-    assert runtime_args["data_retention_days"] == 1095
-
-
-def test_main_uses_custom_retention_days_when_provided(monkeypatch) -> None:
-    mocks = _setup_main(monkeypatch, {"DATA_RETENTION_DAYS": "730"})
-    maintenance_job.main()
-
-    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
-    assert runtime_args["data_retention_days"] == 730
-
-
-# ---------------------------------------------------------------------------
-# main() — ES config
-# ---------------------------------------------------------------------------
-
-def test_main_builds_es_config_with_defaults(monkeypatch) -> None:
-    mocks = _setup_main(monkeypatch)
-    maintenance_job.main()
-
-    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
-    assert runtime_args["es"] == {
-        "host": "localhost",
-        "port": 5432,
-        "database": "entity_store",
-        "user": "motor_eqd",
-        "secret_name": None,
-    }
-
-
-def test_main_uses_custom_es_port(monkeypatch) -> None:
-    mocks = _setup_main(monkeypatch, {"ES_PORT": "5433"})
-    maintenance_job.main()
-
-    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
-    assert runtime_args["es"]["port"] == 5433
-
-
-def test_main_passes_es_secret_name_when_provided(monkeypatch) -> None:
-    mocks = _setup_main(monkeypatch, {"ES_SECRET_NAME": "prod/es-secret"})
-    maintenance_job.main()
-
-    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
-    assert runtime_args["es"]["secret_name"] == "prod/es-secret"
-
-
-# ---------------------------------------------------------------------------
-# main() — pipeline wiring
-# ---------------------------------------------------------------------------
-
-def test_main_passes_job_context_model_from_pipeline_spec(monkeypatch) -> None:
-    mocks = _setup_main(monkeypatch)
-    maintenance_job.main()
-
-    mocks.load_job_context.assert_called_once_with(
-        glue_runtime_args=mocks.load_job_context.call_args.kwargs["glue_runtime_args"],
-        job_context_model=object,
-    )
-
-
-def test_main_calls_pipeline_run_with_job_context(monkeypatch) -> None:
-    job_context = MagicMock()
-    mocks = _setup_main(monkeypatch)
-    mocks.load_job_context.return_value = job_context
-
-    maintenance_job.main()
-
-    mocks.pipeline.run.assert_called_once_with(job_context)
-
-
-def test_main_instantiates_pipeline_from_spec(monkeypatch) -> None:
-    mocks = _setup_main(monkeypatch)
-    maintenance_job.main()
-
-    mocks.pipeline_cls.assert_called_once_with()
+    with pytest.raises(AlreadyExistsError, match="OS data exists"):
+        duplicate_check.check_downstream_not_exist(
+            reporting_date=REPORTING_DATE,
+            dynamodb=MagicMock(),
+            s3=MagicMock(),
+            env=ENV,
+            dap_bucket=DAP_BUCKET,
+            logger=MagicMock(),
+        )
