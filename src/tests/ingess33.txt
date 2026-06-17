@@ -1,0 +1,216 @@
+"""Tests for src/pipelines/maintenance/ingestion.py."""
+from datetime import date
+from unittest.mock import MagicMock, call
+
+import pytest
+
+from pipelines.maintenance import ingestion
+from pipelines.maintenance.ingestion import QUOTE_TABLE, _transform, ingest_quotes
+
+REPORTING_DATE = date(2026, 5, 12)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_chained_df() -> MagicMock:
+    """Mock DataFrame where every chained method returns the same mock."""
+    df = MagicMock(name="DataFrame")
+    df.withColumnRenamed.return_value = df
+    df.withColumn.return_value = df
+    df.select.return_value = df
+    return df
+
+
+def _make_job_context(source_datasets: dict | None = None) -> MagicMock:
+    ctx = MagicMock()
+    ctx.job.source_datasets = source_datasets or {"quote": MagicMock()}
+    return ctx
+
+
+# ---------------------------------------------------------------------------
+# _transform
+# ---------------------------------------------------------------------------
+
+def test_transform_renames_channel_to_source() -> None:
+    df = _make_chained_df()
+    _transform(df)
+    df.withColumnRenamed.assert_called_once_with("channel", "source")
+
+
+def test_transform_adds_reporting_date_column() -> None:
+    df = _make_chained_df()
+    _transform(df)
+    added_columns = [c.args[0] for c in df.withColumn.call_args_list]
+    assert "reporting_date" in added_columns
+
+
+def test_transform_adds_created_at_column() -> None:
+    df = _make_chained_df()
+    _transform(df)
+    added_columns = [c.args[0] for c in df.withColumn.call_args_list]
+    assert "created_at" in added_columns
+
+
+def test_transform_selects_expected_columns() -> None:
+    df = _make_chained_df()
+    _transform(df)
+    df.select.assert_called_once_with(
+        "correlationid",
+        "source",
+        "reporting_date",
+        "created_at",
+        "source_timestamp",
+    )
+
+
+def test_transform_returns_result_of_select() -> None:
+    df = _make_chained_df()
+    selected = MagicMock(name="selected_df")
+    df.select.return_value = selected
+    result = _transform(df)
+    assert result is selected
+
+
+def test_transform_selects_five_columns() -> None:
+    df = _make_chained_df()
+    _transform(df)
+    assert len(df.select.call_args.args) == 5
+
+
+def test_transform_does_not_include_channel_in_select() -> None:
+    df = _make_chained_df()
+    _transform(df)
+    assert "channel" not in df.select.call_args.args
+
+
+# ---------------------------------------------------------------------------
+# ingest_quotes
+# ---------------------------------------------------------------------------
+
+def test_ingest_quotes_loads_source_datasets(monkeypatch) -> None:
+    mock_load = MagicMock(return_value={"quote": _make_chained_df()})
+    monkeypatch.setattr(ingestion, "load_source_datasets_for_reporting_date", mock_load)
+
+    spark = MagicMock()
+    job_context = _make_job_context()
+
+    ingest_quotes(
+        reporting_date=REPORTING_DATE,
+        spark=spark,
+        postgres=MagicMock(),
+        job_context=job_context,
+        logger=MagicMock(),
+    )
+
+    mock_load.assert_called_once_with(
+        spark=spark,
+        source_datasets=job_context.job.source_datasets,
+        reporting_date=REPORTING_DATE,
+    )
+
+
+def test_ingest_quotes_writes_to_quote_table(monkeypatch) -> None:
+    monkeypatch.setattr(
+        ingestion,
+        "load_source_datasets_for_reporting_date",
+        MagicMock(return_value={"quote": _make_chained_df()}),
+    )
+    postgres = MagicMock()
+
+    ingest_quotes(
+        reporting_date=REPORTING_DATE,
+        spark=MagicMock(),
+        postgres=postgres,
+        job_context=_make_job_context(),
+        logger=MagicMock(),
+    )
+
+    assert postgres.write_table.call_args.kwargs["table"] == QUOTE_TABLE
+
+
+def test_ingest_quotes_uses_append_mode(monkeypatch) -> None:
+    monkeypatch.setattr(
+        ingestion,
+        "load_source_datasets_for_reporting_date",
+        MagicMock(return_value={"quote": _make_chained_df()}),
+    )
+    postgres = MagicMock()
+
+    ingest_quotes(
+        reporting_date=REPORTING_DATE,
+        spark=MagicMock(),
+        postgres=postgres,
+        job_context=_make_job_context(),
+        logger=MagicMock(),
+    )
+
+    assert postgres.write_table.call_args.kwargs["mode"] == "append"
+
+
+def test_ingest_quotes_passes_transformed_df_to_postgres(monkeypatch) -> None:
+    raw_df = _make_chained_df()
+    transformed_df = MagicMock(name="transformed_df")
+    raw_df.select.return_value = transformed_df
+
+    monkeypatch.setattr(
+        ingestion,
+        "load_source_datasets_for_reporting_date",
+        MagicMock(return_value={"quote": raw_df}),
+    )
+    postgres = MagicMock()
+
+    ingest_quotes(
+        reporting_date=REPORTING_DATE,
+        spark=MagicMock(),
+        postgres=postgres,
+        job_context=_make_job_context(),
+        logger=MagicMock(),
+    )
+
+    assert postgres.write_table.call_args.kwargs["dataframe"] is transformed_df
+
+
+def test_ingest_quotes_only_transforms_quote_dataset(monkeypatch) -> None:
+    other_df = MagicMock(name="other_df")
+    quote_df = _make_chained_df()
+
+    monkeypatch.setattr(
+        ingestion,
+        "load_source_datasets_for_reporting_date",
+        MagicMock(return_value={"quote": quote_df, "other": other_df}),
+    )
+
+    ingest_quotes(
+        reporting_date=REPORTING_DATE,
+        spark=MagicMock(),
+        postgres=MagicMock(),
+        job_context=_make_job_context(),
+        logger=MagicMock(),
+    )
+
+    other_df.withColumnRenamed.assert_not_called()
+
+
+def test_ingest_quotes_calls_write_table_once(monkeypatch) -> None:
+    monkeypatch.setattr(
+        ingestion,
+        "load_source_datasets_for_reporting_date",
+        MagicMock(return_value={"quote": _make_chained_df()}),
+    )
+    postgres = MagicMock()
+
+    ingest_quotes(
+        reporting_date=REPORTING_DATE,
+        spark=MagicMock(),
+        postgres=postgres,
+        job_context=_make_job_context(),
+        logger=MagicMock(),
+    )
+
+    postgres.write_table.assert_called_once()
+
+
+def test_ingest_quotes_quote_table_is_entity_store_schema() -> None:
+    assert QUOTE_TABLE == "entity_store.quote"
