@@ -1,0 +1,164 @@
+"""Tests for src/pipelines/maintenance/retention.py."""
+from datetime import date, timedelta
+from unittest.mock import MagicMock
+
+import pytest
+
+from pipelines.maintenance.retention import apply_retention, compute_cutoff_date
+
+# ---------------------------------------------------------------------------
+# Shared fixtures
+# ---------------------------------------------------------------------------
+
+REPORTING_DATE = date(2026, 5, 12)
+RETENTION_DAYS = 1095  # 3 years default
+
+
+def _make_job_context(data_retention_days: int = RETENTION_DAYS) -> MagicMock:
+    ctx = MagicMock()
+    ctx.glue_runtime.data_retention_days = data_retention_days
+    return ctx
+
+
+def _run(
+    reporting_date: date = REPORTING_DATE,
+    data_retention_days: int = RETENTION_DAYS,
+    deleted_count: int = 0,
+) -> tuple[MagicMock, MagicMock, int]:
+    """Run apply_retention and return (postgres, logger, result)."""
+    postgres = MagicMock()
+    postgres.delete_quotes_before_date.return_value = deleted_count
+    logger = MagicMock()
+
+    result = apply_retention(
+        reporting_date=reporting_date,
+        postgres=postgres,
+        job_context=_make_job_context(data_retention_days),
+        logger=logger,
+    )
+
+    return postgres, logger, result
+
+
+# ---------------------------------------------------------------------------
+# compute_cutoff_date
+# ---------------------------------------------------------------------------
+
+def test_cutoff_date_subtracts_retention_days() -> None:
+    result = compute_cutoff_date(date(2026, 5, 12), 1095)
+    assert result == date(2026, 5, 12) - timedelta(days=1095)
+
+
+def test_cutoff_date_three_year_default() -> None:
+    result = compute_cutoff_date(date(2026, 5, 12), 1095)
+    assert result == date(2023, 5, 12)
+
+
+def test_cutoff_date_zero_retention_days_returns_reporting_date() -> None:
+    result = compute_cutoff_date(date(2026, 5, 12), 0)
+    assert result == date(2026, 5, 12)
+
+
+def test_cutoff_date_one_day_retention() -> None:
+    result = compute_cutoff_date(date(2026, 5, 12), 1)
+    assert result == date(2026, 5, 11)
+
+
+def test_cutoff_date_spans_year_boundary() -> None:
+    result = compute_cutoff_date(date(2026, 1, 1), 1)
+    assert result == date(2025, 12, 31)
+
+
+def test_cutoff_date_uses_reporting_date_not_today() -> None:
+    result = compute_cutoff_date(date(2020, 6, 15), 365)
+    assert result == date(2019, 6, 15)
+
+
+# ---------------------------------------------------------------------------
+# apply_retention — postgres interaction
+# ---------------------------------------------------------------------------
+
+def test_apply_retention_calls_delete_once() -> None:
+    postgres, _, _ = _run()
+    postgres.delete_quotes_before_date.assert_called_once()
+
+
+def test_apply_retention_passes_correct_cutoff_date() -> None:
+    postgres, _, _ = _run(
+        reporting_date=date(2026, 5, 12),
+        data_retention_days=1095,
+    )
+    expected_cutoff = date(2026, 5, 12) - timedelta(days=1095)
+    assert postgres.delete_quotes_before_date.call_args.kwargs["cutoff_date"] == expected_cutoff
+
+
+def test_apply_retention_cutoff_reflects_custom_retention_days() -> None:
+    postgres, _, _ = _run(
+        reporting_date=date(2026, 5, 12),
+        data_retention_days=365,
+    )
+    assert postgres.delete_quotes_before_date.call_args.kwargs["cutoff_date"] == date(2025, 5, 12)
+
+
+def test_apply_retention_cutoff_reflects_reporting_date() -> None:
+    postgres_a, _, _ = _run(reporting_date=date(2026, 1, 1), data_retention_days=1095)
+    postgres_b, _, _ = _run(reporting_date=date(2026, 6, 1), data_retention_days=1095)
+
+    cutoff_a = postgres_a.delete_quotes_before_date.call_args.kwargs["cutoff_date"]
+    cutoff_b = postgres_b.delete_quotes_before_date.call_args.kwargs["cutoff_date"]
+
+    assert cutoff_a < cutoff_b
+
+
+# ---------------------------------------------------------------------------
+# apply_retention — return value
+# ---------------------------------------------------------------------------
+
+def test_apply_retention_returns_deleted_count() -> None:
+    _, _, result = _run(deleted_count=42)
+    assert result == 42
+
+
+def test_apply_retention_returns_zero_when_nothing_deleted() -> None:
+    _, _, result = _run(deleted_count=0)
+    assert result == 0
+
+
+def test_apply_retention_returns_large_deleted_count() -> None:
+    _, _, result = _run(deleted_count=1_000_000)
+    assert result == 1_000_000
+
+
+# ---------------------------------------------------------------------------
+# apply_retention — logging
+# ---------------------------------------------------------------------------
+
+def test_apply_retention_logs_at_least_twice() -> None:
+    _, logger, _ = _run()
+    assert logger.info.call_count >= 2
+
+
+def test_initial_log_contains_cutoff_date() -> None:
+    _, logger, _ = _run(
+        reporting_date=date(2026, 5, 12),
+        data_retention_days=1095,
+    )
+    expected_cutoff = str(date(2026, 5, 12) - timedelta(days=1095))
+    first_log = logger.info.call_args_list[0].args[0]
+    assert expected_cutoff in first_log
+
+
+def test_completion_log_contains_deleted_count() -> None:
+    _, logger, _ = _run(deleted_count=77)
+    log_messages = [c.args[0] for c in logger.info.call_args_list]
+    assert any("77" in msg for msg in log_messages)
+
+
+def test_completion_log_contains_cutoff_date() -> None:
+    _, logger, _ = _run(
+        reporting_date=date(2026, 5, 12),
+        data_retention_days=1095,
+    )
+    expected_cutoff = str(date(2026, 5, 12) - timedelta(days=1095))
+    log_messages = [c.args[0] for c in logger.info.call_args_list]
+    assert any(expected_cutoff in msg for msg in log_messages)
