@@ -1,216 +1,147 @@
-"""Tests for src/pipelines/maintenance/ingestion.py."""
+"""Tests for src/pipelines/maintenance/partitions.py."""
 from datetime import date
 from unittest.mock import MagicMock, call
 
 import pytest
 
-from pipelines.maintenance import ingestion
-from pipelines.maintenance.ingestion import QUOTE_TABLE, _transform, ingest_quotes
+from pipelines.maintenance.partitions import ensure_partitions
+
+# ---------------------------------------------------------------------------
+# Shared fixtures
+# ---------------------------------------------------------------------------
 
 REPORTING_DATE = date(2026, 5, 12)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _make_chained_df() -> MagicMock:
-    """Mock DataFrame where every chained method returns the same mock."""
-    df = MagicMock(name="DataFrame")
-    df.withColumnRenamed.return_value = df
-    df.withColumn.return_value = df
-    df.select.return_value = df
-    return df
-
-
-def _make_job_context(source_datasets: dict | None = None) -> MagicMock:
-    ctx = MagicMock()
-    ctx.job.source_datasets = source_datasets or {"quote": MagicMock()}
-    return ctx
-
-
-# ---------------------------------------------------------------------------
-# _transform
-# ---------------------------------------------------------------------------
-
-def test_transform_renames_channel_to_source() -> None:
-    df = _make_chained_df()
-    _transform(df)
-    df.withColumnRenamed.assert_called_once_with("channel", "source")
-
-
-def test_transform_adds_reporting_date_column() -> None:
-    df = _make_chained_df()
-    _transform(df)
-    added_columns = [c.args[0] for c in df.withColumn.call_args_list]
-    assert "reporting_date" in added_columns
-
-
-def test_transform_adds_created_at_column() -> None:
-    df = _make_chained_df()
-    _transform(df)
-    added_columns = [c.args[0] for c in df.withColumn.call_args_list]
-    assert "created_at" in added_columns
-
-
-def test_transform_selects_expected_columns() -> None:
-    df = _make_chained_df()
-    _transform(df)
-    df.select.assert_called_once_with(
-        "correlationid",
-        "source",
-        "reporting_date",
-        "created_at",
-        "source_timestamp",
-    )
-
-
-def test_transform_returns_result_of_select() -> None:
-    df = _make_chained_df()
-    selected = MagicMock(name="selected_df")
-    df.select.return_value = selected
-    result = _transform(df)
-    assert result is selected
-
-
-def test_transform_selects_five_columns() -> None:
-    df = _make_chained_df()
-    _transform(df)
-    assert len(df.select.call_args.args) == 5
-
-
-def test_transform_does_not_include_channel_in_select() -> None:
-    df = _make_chained_df()
-    _transform(df)
-    assert "channel" not in df.select.call_args.args
-
-
-# ---------------------------------------------------------------------------
-# ingest_quotes
-# ---------------------------------------------------------------------------
-
-def test_ingest_quotes_loads_source_datasets(monkeypatch) -> None:
-    mock_load = MagicMock(return_value={"quote": _make_chained_df()})
-    monkeypatch.setattr(ingestion, "load_source_datasets_for_reporting_date", mock_load)
-
-    spark = MagicMock()
-    job_context = _make_job_context()
-
-    ingest_quotes(
-        reporting_date=REPORTING_DATE,
-        spark=spark,
-        postgres=MagicMock(),
-        job_context=job_context,
-        logger=MagicMock(),
-    )
-
-    mock_load.assert_called_once_with(
-        spark=spark,
-        source_datasets=job_context.job.source_datasets,
-        reporting_date=REPORTING_DATE,
-    )
-
-
-def test_ingest_quotes_writes_to_quote_table(monkeypatch) -> None:
-    monkeypatch.setattr(
-        ingestion,
-        "load_source_datasets_for_reporting_date",
-        MagicMock(return_value={"quote": _make_chained_df()}),
-    )
+def _run(
+    reporting_date: date = REPORTING_DATE,
+    created: bool = False,
+) -> tuple[MagicMock, MagicMock]:
+    """Run ensure_partitions and return (postgres, logger) mocks."""
     postgres = MagicMock()
+    postgres.ensure_quote_partition.return_value = created
+    logger = MagicMock()
 
-    ingest_quotes(
-        reporting_date=REPORTING_DATE,
-        spark=MagicMock(),
+    ensure_partitions(
+        reporting_date=reporting_date,
         postgres=postgres,
-        job_context=_make_job_context(),
-        logger=MagicMock(),
+        logger=logger,
     )
 
-    assert postgres.write_table.call_args.kwargs["table"] == QUOTE_TABLE
+    return postgres, logger
 
 
-def test_ingest_quotes_uses_append_mode(monkeypatch) -> None:
-    monkeypatch.setattr(
-        ingestion,
-        "load_source_datasets_for_reporting_date",
-        MagicMock(return_value={"quote": _make_chained_df()}),
+# ---------------------------------------------------------------------------
+# Partition name format
+# ---------------------------------------------------------------------------
+
+def test_partition_name_standard_date() -> None:
+    postgres, _ = _run(reporting_date=date(2026, 5, 12))
+    partition_name = postgres.ensure_quote_partition.call_args.kwargs["partition_name"]
+    assert partition_name == "quote_2026_05"
+
+
+def test_partition_name_single_digit_month_is_zero_padded() -> None:
+    postgres, _ = _run(reporting_date=date(2026, 1, 1))
+    partition_name = postgres.ensure_quote_partition.call_args.kwargs["partition_name"]
+    assert partition_name == "quote_2026_01"
+
+
+def test_partition_name_december() -> None:
+    postgres, _ = _run(reporting_date=date(2026, 12, 31))
+    partition_name = postgres.ensure_quote_partition.call_args.kwargs["partition_name"]
+    assert partition_name == "quote_2026_12"
+
+
+def test_partition_name_uses_year_from_reporting_date() -> None:
+    postgres, _ = _run(reporting_date=date(2025, 3, 1))
+    partition_name = postgres.ensure_quote_partition.call_args.kwargs["partition_name"]
+    assert partition_name.startswith("quote_2025_")
+
+
+def test_partition_name_prefix_is_quote() -> None:
+    postgres, _ = _run()
+    partition_name = postgres.ensure_quote_partition.call_args.kwargs["partition_name"]
+    assert partition_name.startswith("quote_")
+
+
+# ---------------------------------------------------------------------------
+# Postgres interaction
+# ---------------------------------------------------------------------------
+
+def test_ensure_quote_partition_called_once() -> None:
+    postgres, _ = _run()
+    postgres.ensure_quote_partition.assert_called_once()
+
+
+def test_ensure_quote_partition_receives_reporting_date() -> None:
+    postgres, _ = _run(reporting_date=REPORTING_DATE)
+    assert postgres.ensure_quote_partition.call_args.kwargs["reporting_date"] == REPORTING_DATE
+
+
+def test_ensure_quote_partition_receives_correct_partition_name() -> None:
+    postgres, _ = _run(reporting_date=date(2026, 5, 12))
+    assert postgres.ensure_quote_partition.call_args.kwargs["partition_name"] == "quote_2026_05"
+
+
+# ---------------------------------------------------------------------------
+# Branch: partition created
+# ---------------------------------------------------------------------------
+
+def test_logs_created_when_partition_is_new() -> None:
+    _, logger = _run(created=True)
+    log_messages = [c.args[0] for c in logger.info.call_args_list]
+    assert any("created" in msg.lower() for msg in log_messages)
+
+
+def test_logs_created_message_contains_partition_name() -> None:
+    _, logger = _run(reporting_date=date(2026, 5, 12), created=True)
+    log_messages = [c.args[0] for c in logger.info.call_args_list]
+    assert any("quote_2026_05" in msg for msg in log_messages)
+
+
+def test_does_not_log_already_exists_when_partition_is_new() -> None:
+    _, logger = _run(created=True)
+    log_messages = [c.args[0] for c in logger.info.call_args_list]
+    assert not any("already exists" in msg.lower() for msg in log_messages)
+
+
+# ---------------------------------------------------------------------------
+# Branch: partition already exists
+# ---------------------------------------------------------------------------
+
+def test_logs_already_exists_when_partition_present() -> None:
+    _, logger = _run(created=False)
+    log_messages = [c.args[0] for c in logger.info.call_args_list]
+    assert any("already exists" in msg.lower() for msg in log_messages)
+
+
+def test_logs_already_exists_message_contains_partition_name() -> None:
+    _, logger = _run(reporting_date=date(2026, 5, 12), created=False)
+    log_messages = [c.args[0] for c in logger.info.call_args_list]
+    assert any("quote_2026_05" in msg for msg in log_messages)
+
+
+def test_does_not_log_created_when_partition_already_exists() -> None:
+    _, logger = _run(created=False)
+    # "created" should not appear as a standalone action — only in "already exists" context
+    log_messages = [c.args[0] for c in logger.info.call_args_list]
+    assert not any(
+        msg.lower().strip().endswith("created") or "partition created" in msg.lower()
+        for msg in log_messages
     )
-    postgres = MagicMock()
-
-    ingest_quotes(
-        reporting_date=REPORTING_DATE,
-        spark=MagicMock(),
-        postgres=postgres,
-        job_context=_make_job_context(),
-        logger=MagicMock(),
-    )
-
-    assert postgres.write_table.call_args.kwargs["mode"] == "append"
 
 
-def test_ingest_quotes_passes_transformed_df_to_postgres(monkeypatch) -> None:
-    raw_df = _make_chained_df()
-    transformed_df = MagicMock(name="transformed_df")
-    raw_df.select.return_value = transformed_df
+# ---------------------------------------------------------------------------
+# Logging — general
+# ---------------------------------------------------------------------------
 
-    monkeypatch.setattr(
-        ingestion,
-        "load_source_datasets_for_reporting_date",
-        MagicMock(return_value={"quote": raw_df}),
-    )
-    postgres = MagicMock()
-
-    ingest_quotes(
-        reporting_date=REPORTING_DATE,
-        spark=MagicMock(),
-        postgres=postgres,
-        job_context=_make_job_context(),
-        logger=MagicMock(),
-    )
-
-    assert postgres.write_table.call_args.kwargs["dataframe"] is transformed_df
+def test_logs_at_least_twice() -> None:
+    _, logger = _run()
+    assert logger.info.call_count >= 2
 
 
-def test_ingest_quotes_only_transforms_quote_dataset(monkeypatch) -> None:
-    other_df = MagicMock(name="other_df")
-    quote_df = _make_chained_df()
-
-    monkeypatch.setattr(
-        ingestion,
-        "load_source_datasets_for_reporting_date",
-        MagicMock(return_value={"quote": quote_df, "other": other_df}),
-    )
-
-    ingest_quotes(
-        reporting_date=REPORTING_DATE,
-        spark=MagicMock(),
-        postgres=MagicMock(),
-        job_context=_make_job_context(),
-        logger=MagicMock(),
-    )
-
-    other_df.withColumnRenamed.assert_not_called()
-
-
-def test_ingest_quotes_calls_write_table_once(monkeypatch) -> None:
-    monkeypatch.setattr(
-        ingestion,
-        "load_source_datasets_for_reporting_date",
-        MagicMock(return_value={"quote": _make_chained_df()}),
-    )
-    postgres = MagicMock()
-
-    ingest_quotes(
-        reporting_date=REPORTING_DATE,
-        spark=MagicMock(),
-        postgres=postgres,
-        job_context=_make_job_context(),
-        logger=MagicMock(),
-    )
-
-    postgres.write_table.assert_called_once()
-
-
-def test_ingest_quotes_quote_table_is_entity_store_schema() -> None:
-    assert QUOTE_TABLE == "entity_store.quote"
+def test_initial_log_contains_partition_name() -> None:
+    _, logger = _run(reporting_date=date(2026, 5, 12))
+    first_log = logger.info.call_args_list[0].args[0]
+    assert "quote_2026_05" in first_log
