@@ -1,7 +1,7 @@
 def test_main_metastore_defaults_to_none_when_absent(monkeypatch) -> None:
-    args = _base_args()
-    args.pop("METASTORE")
-    mocks = _setup_main(monkeypatch, args)
+    args = {k: v for k, v in _base_args().items() if k != "METASTORE"}
+    mocks = _setup_main(monkeypatch)
+    monkeypatch.setattr(matching_job, "parse_args", MagicMock(return_value=args))
     matching_job.main()
 
     runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
