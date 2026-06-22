@@ -1,12 +1,8 @@
-def parse_execution_ts(value: str) -> datetime:
-    """Parses execution_ts string in YYYYMMDDHHmmss format, returns UTC datetime.
+def test_main_metastore_defaults_to_none_when_absent(monkeypatch) -> None:
+    args = _base_args()
+    args.pop("METASTORE")
+    mocks = _setup_main(monkeypatch, args)
+    matching_job.main()
 
-    Example valid value: '20260615143022'
-    """
-    try:
-        dt = datetime.strptime(value, "%Y%m%d%H%M%S")
-    except ValueError:
-        raise ValueError(
-            f"Invalid execution_ts '{value}': expected YYYYMMDDHHmmss format (e.g. '20260615143022')"
-        )
-    return dt.replace(tzinfo=UTC)
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert runtime_args["metastore"] is None
