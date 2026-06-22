@@ -1,0 +1,48 @@
+"""Tests for src/utils/common.py — resolve_aws_region."""
+import pytest
+
+from utils.common import resolve_aws_region
+
+
+def test_resolve_aws_region_uses_aws_region_env(monkeypatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    assert resolve_aws_region() == "eu-west-1"
+
+
+def test_resolve_aws_region_falls_back_to_aws_default_region(monkeypatch) -> None:
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-south-1")
+
+    assert resolve_aws_region() == "ap-south-1"
+
+
+def test_resolve_aws_region_prefers_aws_region_over_default(monkeypatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+
+    assert resolve_aws_region() == "eu-west-1"
+
+
+def test_resolve_aws_region_strips_whitespace(monkeypatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "  eu-central-1  ")
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    assert resolve_aws_region() == "eu-central-1"
+
+
+def test_resolve_aws_region_raises_when_no_env_set(monkeypatch) -> None:
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+
+    with pytest.raises(ValueError, match="AWS region is required"):
+        resolve_aws_region()
+
+
+def test_resolve_aws_region_skips_blank_values_and_raises(monkeypatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "   ")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "")
+
+    with pytest.raises(ValueError, match="AWS region is required"):
+        resolve_aws_region()
