@@ -1,48 +1,246 @@
-"""Tests for src/utils/common.py — resolve_aws_region."""
-import pytest
+"""Tests for jobs/maintenance_job.py entrypoint.
 
-from utils.common import resolve_aws_region
+maintenance_job is imported at module level (not inside each test function) so
+that the awsglue stub in conftest.py is already in sys.modules when the import
+runs. This guarantees maintenance_job.getResolvedOptions exists as a MagicMock
+and monkeypatch.setattr can target it reliably.
 
+All 11 args are required — no OPTIONAL_ARGS, no default fallbacks.
+JOB_SUBTYPE is parsed but not forwarded to glue_runtime_args (maintenance
+has no subtype; PIPELINES key is always (MAINTENANCE, None)).
+"""
+from datetime import UTC, date, datetime
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
-def test_resolve_aws_region_uses_aws_region_env(monkeypatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "eu-west-1")
-    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+import jobs.maintenance_job as maintenance_job
+from test import constants
 
-    assert resolve_aws_region() == "eu-west-1"
+# ---------------------------------------------------------------------------
+# Expected args — mirrors the list in parse_args()
+# ---------------------------------------------------------------------------
 
-
-def test_resolve_aws_region_falls_back_to_aws_default_region(monkeypatch) -> None:
-    monkeypatch.delenv("AWS_REGION", raising=False)
-    monkeypatch.setenv("AWS_DEFAULT_REGION", "ap-south-1")
-
-    assert resolve_aws_region() == "ap-south-1"
-
-
-def test_resolve_aws_region_prefers_aws_region_over_default(monkeypatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "eu-west-1")
-    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
-
-    assert resolve_aws_region() == "eu-west-1"
-
-
-def test_resolve_aws_region_strips_whitespace(monkeypatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "  eu-central-1  ")
-    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
-
-    assert resolve_aws_region() == "eu-central-1"
-
-
-def test_resolve_aws_region_raises_when_no_env_set(monkeypatch) -> None:
-    monkeypatch.delenv("AWS_REGION", raising=False)
-    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
-
-    with pytest.raises(ValueError, match="AWS region is required"):
-        resolve_aws_region()
+EXPECTED_ARG_KEYS = [
+    "JOB_SUBTYPE",
+    "ENV",
+    "REPORTING_DATE",
+    "EXECUTION_TS",
+    "METASTORE",
+    "CONFIG_S3",
+    "DAP_S3",
+    "ES_HOST",
+    "ES_PORT",
+    "ES_DATABASE",
+    "ES_USER",
+]
 
 
-def test_resolve_aws_region_skips_blank_values_and_raises(monkeypatch) -> None:
-    monkeypatch.setenv("AWS_REGION", "   ")
-    monkeypatch.setenv("AWS_DEFAULT_REGION", "")
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-    with pytest.raises(ValueError, match="AWS region is required"):
-        resolve_aws_region()
+def _base_args(overrides: dict | None = None) -> dict:
+    """Minimal valid args dict matching all required args."""
+    args = {
+        "JOB_SUBTYPE": "person",
+        "ENV": "local",
+        "REPORTING_DATE": "2026-05-12",
+        "EXECUTION_TS": constants.EXECUTION_TS,
+        "METASTORE": constants.METASTORE,
+        "CONFIG_S3": constants.CONFIG_S3,
+        "DAP_S3": constants.DAP_S3,
+        "ES_HOST": "localhost",
+        "ES_PORT": "5432",
+        "ES_DATABASE": "entity_store",
+        "ES_USER": "motor_eqd",
+    }
+    if overrides:
+        args.update(overrides)
+    return args
+
+
+def _setup_main(monkeypatch, args_overrides: dict | None = None):
+    """Patches configure_logging, parse_args, PIPELINES, and load_job_context.
+
+    Returns a SimpleNamespace(pipeline, pipeline_cls, pipeline_spec, load_job_context).
+    """
+    pipeline = MagicMock()
+    pipeline_cls = MagicMock(return_value=pipeline)
+    pipeline_spec = SimpleNamespace(
+        pipeline_cls=pipeline_cls,
+        job_context_model=object,
+    )
+    load_job_context = MagicMock(return_value=MagicMock())
+
+    monkeypatch.setattr(
+        maintenance_job,
+        "configure_logging",
+        MagicMock(return_value=MagicMock()),
+    )
+    monkeypatch.setattr(
+        maintenance_job,
+        "parse_args",
+        MagicMock(return_value=_base_args(args_overrides)),
+    )
+    monkeypatch.setattr(
+        maintenance_job,
+        "PIPELINES",
+        {(maintenance_job.JobName.MAINTENANCE, None): pipeline_spec},
+    )
+    monkeypatch.setattr(maintenance_job, "load_job_context", load_job_context)
+
+    return SimpleNamespace(
+        pipeline=pipeline,
+        pipeline_cls=pipeline_cls,
+        pipeline_spec=pipeline_spec,
+        load_job_context=load_job_context,
+    )
+
+
+# ---------------------------------------------------------------------------
+# parse_args
+# ---------------------------------------------------------------------------
+
+def test_parse_args_returns_all_required_keys(monkeypatch) -> None:
+    provided = _base_args()
+    monkeypatch.setattr(
+        maintenance_job.getResolvedOptions,
+        "side_effect",
+        lambda argv, keys: {k: provided[k] for k in keys},
+    )
+
+    result = maintenance_job.parse_args()
+
+    for key in EXPECTED_ARG_KEYS:
+        assert key in result
+
+
+# ---------------------------------------------------------------------------
+# main() — runtime args construction
+# ---------------------------------------------------------------------------
+
+def test_main_sets_job_name_to_maintenance(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert runtime_args["job_name"] == "maintenance"
+
+
+def test_main_sets_env_from_args(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert runtime_args["env"] == "local"
+
+
+def test_main_parses_reporting_date_correctly(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert runtime_args["reporting_date"] == date(2026, 5, 12)
+
+
+def test_main_parses_execution_ts_as_utc_datetime(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert isinstance(runtime_args["execution_ts"], datetime)
+    assert runtime_args["execution_ts"].tzinfo is UTC
+    assert runtime_args["execution_ts"] == datetime(2026, 5, 12, 9, 0, 0, tzinfo=UTC)
+
+
+def test_main_sets_metastore_from_args(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert runtime_args["metastore"] == constants.METASTORE
+
+
+def test_main_sets_config_s3_from_args(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert runtime_args["config_s3"] == constants.CONFIG_S3
+
+
+def test_main_sets_dap_s3_from_args(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert runtime_args["dap_s3"] == constants.DAP_S3
+
+
+def test_main_does_not_include_job_subtype_in_runtime_args(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert "job_subtype" not in runtime_args
+
+
+# ---------------------------------------------------------------------------
+# main() — ES config
+# ---------------------------------------------------------------------------
+
+def test_main_builds_es_config_from_args(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert runtime_args["es"] == {
+        "host": "localhost",
+        "port": 5432,
+        "database": "entity_store",
+        "user": "motor_eqd",
+    }
+
+
+def test_main_casts_es_port_to_int(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch, {"ES_PORT": "5433"})
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert runtime_args["es"]["port"] == 5433
+
+
+def test_main_es_config_has_no_secret_name(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    runtime_args = mocks.load_job_context.call_args.kwargs["glue_runtime_args"]
+    assert "secret_name" not in runtime_args["es"]
+
+
+# ---------------------------------------------------------------------------
+# main() — pipeline wiring
+# ---------------------------------------------------------------------------
+
+def test_main_passes_correct_job_context_model_to_load_job_context(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    assert mocks.load_job_context.call_args.kwargs["job_context_model"] is object
+
+
+def test_main_calls_pipeline_run_with_job_context(monkeypatch) -> None:
+    job_context = MagicMock()
+    mocks = _setup_main(monkeypatch)
+    mocks.load_job_context.return_value = job_context
+
+    maintenance_job.main()
+
+    mocks.pipeline.run.assert_called_once_with(job_context)
+
+
+def test_main_instantiates_pipeline_from_spec(monkeypatch) -> None:
+    mocks = _setup_main(monkeypatch)
+    maintenance_job.main()
+
+    mocks.pipeline_cls.assert_called_once_with()
