@@ -1,31 +1,10 @@
-# ---------------------------------------------------------------------------
-# ensure_quote_partition
-# ---------------------------------------------------------------------------
-
-def test_ensure_partition_returns_false_when_already_exists(mock_psycopg_connect) -> None:
-    """Partition exists → logs and returns False without creating."""
-    mock_psycopg_connect.cursor.fetchone.return_value = (True,)
-    result = _make_connector().ensure_quote_partition(
-        reporting_date=date(2026, 5, 1), partition_name="quote_2026_05"
+def test_no_type_mismatch_when_types_match(mock_dataframe, mock_schema):
+    # actual and expected schemas have the same type on every column
+    # check_types=True but no mismatch → should NOT raise
+    validate_dataframe_schema(
+        dataframe=mock_dataframe,
+        expected_schema=matching_schema,   # same types as actual
+        check_types=True,
+        check_nullable=False,
     )
-    assert result is False
-
-
-def test_ensure_partition_returns_true_when_created(mock_psycopg_connect) -> None:
-    """Partition missing (non-December) → creates it and returns True."""
-    mock_psycopg_connect.cursor.fetchone.return_value = (False,)
-    result = _make_connector().ensure_quote_partition(
-        reporting_date=date(2026, 5, 1), partition_name="quote_2026_05"
-    )
-    assert result is True
-
-
-def test_ensure_partition_december_end_date_rolls_over_to_next_year(mock_psycopg_connect) -> None:
-    """month == 12 branch: end_date must be Jan 1 of the following year."""
-    mock_psycopg_connect.cursor.fetchone.return_value = (False,)
-    _make_connector().ensure_quote_partition(
-        reporting_date=date(2026, 12, 1), partition_name="quote_2026_12"
-    )
-    # Second cursor.execute carries [start_date, end_date] — end_date must be 2027-01-01
-    create_call_params = mock_psycopg_connect.cursor.execute.call_args_list[1].args[1]
-    assert create_call_params[1] == date(2027, 1, 1)
+    # passes without raising = branch covered
