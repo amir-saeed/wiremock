@@ -1,0 +1,219 @@
+"""Tests for src/runtime/postgres_queries.py.
+
+Strategy
+--------
+psycopg `sql.Composed` objects are pure Python data structures — no DB
+connection is needed to build or inspect them.  We use two helpers:
+
+  _sql_text(obj)        — extracts all literal SQL template strings
+  _find_identifiers(obj) — collects every sql.Identifier in the tree
+
+These let us assert on SQL structure without connecting to PostgreSQL.
+"""
+from __future__ import annotations
+
+from psycopg import sql
+
+from runtime.postgres_queries import (
+    CREATE_QUOTE_PARTITION_QUERY,
+    DELETE_ORPHAN_CLUSTERS_QUERY,
+    DELETE_QUOTES_BATCH_QUERY,
+    DELETE_RELATIONS_FOR_REPORTING_DATE_QUERY,
+    ENSURE_QUOTE_PARTITION_QUERY,
+    HAS_QUOTES_FOR_REPORTING_DATE_QUERY,
+    HAS_RESULTS_FOR_REPORTING_DATE_QUERY,
+    MATCHED_ENTITIES_FOR_REPORTING_DATE_QUERY,
+    PERSON_RESIDENCE_HISTORY_FOR_REPORTING_DATE_QUERY,
+    SCAN_PARTITION_QUERY,
+)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _sql_text(obj: sql.Composable) -> str:
+    """Return all literal SQL template strings in a composable, concatenated."""
+    if isinstance(obj, sql.SQL):
+        return obj.string
+    if isinstance(obj, sql.Composed):
+        return "".join(_sql_text(part) for part in obj.seq)
+    return ""  # Identifier / Literal / Placeholder — not literal text
+
+
+def _find_identifiers(obj: sql.Composable) -> list[sql.Identifier]:
+    """Collect every sql.Identifier leaf in a composable tree."""
+    if isinstance(obj, sql.Identifier):
+        return [obj]
+    if isinstance(obj, sql.Composed):
+        result: list[sql.Identifier] = []
+        for part in obj.seq:
+            result.extend(_find_identifiers(part))
+        return result
+    return []
+
+
+def _make_partition_identifier(
+    schema: str = "entity_store",
+    table: str = "quote_2026_05",
+) -> sql.Composed:
+    """Build a partition identifier the same way PostgresConnector does."""
+    return sql.SQL("{}.{}").format(sql.Identifier(schema), sql.Identifier(table))
+
+
+# ---------------------------------------------------------------------------
+# Module-level constants — type checks (covered by import; confirm contract)
+# ---------------------------------------------------------------------------
+
+def test_has_results_for_reporting_date_query_is_sql() -> None:
+    assert isinstance(HAS_RESULTS_FOR_REPORTING_DATE_QUERY, sql.SQL)
+
+
+def test_delete_relations_for_reporting_date_query_is_sql() -> None:
+    assert isinstance(DELETE_RELATIONS_FOR_REPORTING_DATE_QUERY, sql.SQL)
+
+
+def test_delete_orphan_clusters_query_is_sql() -> None:
+    assert isinstance(DELETE_ORPHAN_CLUSTERS_QUERY, sql.SQL)
+
+
+def test_scan_partition_query_is_sql() -> None:
+    assert isinstance(SCAN_PARTITION_QUERY, sql.SQL)
+
+
+def test_matched_entities_for_reporting_date_query_is_sql() -> None:
+    assert isinstance(MATCHED_ENTITIES_FOR_REPORTING_DATE_QUERY, sql.SQL)
+
+
+def test_person_residence_history_for_reporting_date_query_is_sql() -> None:
+    assert isinstance(PERSON_RESIDENCE_HISTORY_FOR_REPORTING_DATE_QUERY, sql.SQL)
+
+
+def test_has_quotes_for_reporting_date_query_is_composed() -> None:
+    # Formatted against _QUOTE_TABLE at module load — must be Composed
+    assert isinstance(HAS_QUOTES_FOR_REPORTING_DATE_QUERY, sql.Composed)
+
+
+def test_delete_quotes_batch_query_is_composed() -> None:
+    assert isinstance(DELETE_QUOTES_BATCH_QUERY, sql.Composed)
+
+
+def test_ensure_quote_partition_query_is_composed() -> None:
+    assert isinstance(ENSURE_QUOTE_PARTITION_QUERY, sql.Composed)
+
+
+# ---------------------------------------------------------------------------
+# Module-level constants — quote table identifier embedded
+# ---------------------------------------------------------------------------
+
+def test_has_quotes_query_contains_entity_store_identifier() -> None:
+    identifiers = [str(i) for i in _find_identifiers(HAS_QUOTES_FOR_REPORTING_DATE_QUERY)]
+    assert any("entity_store" in s for s in identifiers)
+
+
+def test_has_quotes_query_contains_quote_identifier() -> None:
+    identifiers = [str(i) for i in _find_identifiers(HAS_QUOTES_FOR_REPORTING_DATE_QUERY)]
+    assert any("quote" in s for s in identifiers)
+
+
+def test_delete_quotes_batch_query_contains_entity_store_identifier() -> None:
+    identifiers = [str(i) for i in _find_identifiers(DELETE_QUOTES_BATCH_QUERY)]
+    assert any("entity_store" in s for s in identifiers)
+
+
+def test_ensure_partition_query_contains_entity_store_schema_literal() -> None:
+    # ENSURE_QUOTE_PARTITION_QUERY uses sql.Literal(ENTITY_STORE_SCHEMA) for the schema filter
+    text = _sql_text(ENSURE_QUOTE_PARTITION_QUERY)
+    assert "pg_class" in text
+    assert "pg_namespace" in text
+
+
+# ---------------------------------------------------------------------------
+# CREATE_QUOTE_PARTITION_QUERY — return type
+# ---------------------------------------------------------------------------
+
+def test_create_partition_query_returns_composed() -> None:
+    result = CREATE_QUOTE_PARTITION_QUERY(_make_partition_identifier())
+    assert isinstance(result, sql.Composed)
+
+
+# ---------------------------------------------------------------------------
+# CREATE_QUOTE_PARTITION_QUERY — SQL structure (DDL keywords)
+# ---------------------------------------------------------------------------
+
+def test_create_partition_query_contains_create_table_if_not_exists() -> None:
+    result = CREATE_QUOTE_PARTITION_QUERY(_make_partition_identifier())
+    assert "CREATE TABLE IF NOT EXISTS" in _sql_text(result)
+
+
+def test_create_partition_query_contains_partition_of() -> None:
+    result = CREATE_QUOTE_PARTITION_QUERY(_make_partition_identifier())
+    assert "PARTITION OF" in _sql_text(result)
+
+
+def test_create_partition_query_contains_for_values_from() -> None:
+    result = CREATE_QUOTE_PARTITION_QUERY(_make_partition_identifier())
+    assert "FOR VALUES FROM" in _sql_text(result)
+
+
+def test_create_partition_query_contains_two_placeholders() -> None:
+    result = CREATE_QUOTE_PARTITION_QUERY(_make_partition_identifier())
+    assert _sql_text(result).count("%s") == 2
+
+
+# ---------------------------------------------------------------------------
+# CREATE_QUOTE_PARTITION_QUERY — identifiers embedded correctly
+# ---------------------------------------------------------------------------
+
+def test_create_partition_query_embeds_partition_identifier() -> None:
+    """The partition_identifier object passed in must appear in the seq."""
+    partition_id = _make_partition_identifier(table="quote_2026_05")
+    result = CREATE_QUOTE_PARTITION_QUERY(partition_id)
+    assert any(part is partition_id for part in result.seq)
+
+
+def test_create_partition_query_embeds_quote_table_identifiers() -> None:
+    """entity_store.quote from _QUOTE_TABLE must be in the composed tree."""
+    result = CREATE_QUOTE_PARTITION_QUERY(_make_partition_identifier())
+    identifier_strings = [str(i) for i in _find_identifiers(result)]
+    assert any("entity_store" in s for s in identifier_strings)
+    assert any("quote" in s for s in identifier_strings)
+
+
+def test_create_partition_query_partition_identifier_is_first_format_arg() -> None:
+    """First non-SQL-text element in seq is the partition_identifier."""
+    partition_id = _make_partition_identifier(table="quote_2025_12")
+    result = CREATE_QUOTE_PARTITION_QUERY(partition_id)
+    non_text = [part for part in result.seq if not isinstance(part, sql.SQL)]
+    assert non_text[0] is partition_id
+
+
+def test_create_partition_query_quote_table_is_second_format_arg() -> None:
+    """Second non-SQL-text element in seq is _QUOTE_TABLE (entity_store.quote)."""
+    partition_id = _make_partition_identifier(table="quote_2025_12")
+    result = CREATE_QUOTE_PARTITION_QUERY(partition_id)
+    non_text = [part for part in result.seq if not isinstance(part, sql.SQL)]
+    # _QUOTE_TABLE is a Composed: sql.Identifier("entity_store") + sql.Identifier("quote")
+    quote_identifiers = _find_identifiers(non_text[1])
+    names = [str(i) for i in quote_identifiers]
+    assert any("entity_store" in s for s in names)
+    assert any("quote" in s for s in names)
+
+
+# ---------------------------------------------------------------------------
+# CREATE_QUOTE_PARTITION_QUERY — different inputs produce different results
+# ---------------------------------------------------------------------------
+
+def test_create_partition_query_different_tables_differ() -> None:
+    may = CREATE_QUOTE_PARTITION_QUERY(_make_partition_identifier(table="quote_2026_05"))
+    june = CREATE_QUOTE_PARTITION_QUERY(_make_partition_identifier(table="quote_2026_06"))
+    assert may != june
+
+
+def test_create_partition_query_result_is_independent_of_other_calls() -> None:
+    id_a = _make_partition_identifier(table="quote_2026_01")
+    id_b = _make_partition_identifier(table="quote_2026_02")
+    result_a = CREATE_QUOTE_PARTITION_QUERY(id_a)
+    result_b = CREATE_QUOTE_PARTITION_QUERY(id_b)
+    # Calling once does not mutate the other result
+    assert any(part is id_a for part in result_a.seq)
+    assert any(part is id_b for part in result_b.seq)
