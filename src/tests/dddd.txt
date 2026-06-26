@@ -1,133 +1,19 @@
-"""Tests for PostgresConnector.has_quotes_for_reporting_date."""
-from __future__ import annotations
-
-import logging
-from datetime import date
-from unittest.mock import MagicMock
-
-import pytest
-
-from runtime.postgres import PostgresConnector
-from runtime.postgres_queries import HAS_QUOTES_FOR_REPORTING_DATE_QUERY
-
-REPORTING_DATE = date(2026, 5, 12)
-
 # ---------------------------------------------------------------------------
-# Helpers
+# delete_quotes_before_date
 # ---------------------------------------------------------------------------
 
-def _make_connector(logger: logging.Logger | MagicMock | None = None) -> PostgresConnector:
-    """Build a PostgresConnector wired to localhost (psycopg.connect is patched)."""
-    return PostgresConnector(
-        jdbc_url="jdbc:postgresql://localhost:5432/entity_store",
-        properties={"user": "motor_eqd"},
-        psycopg_kwargs={
-            "host": "localhost",
-            "port": 5432,
-            "dbname": "entity_store",
-            "user": "motor_eqd",
-            "connect_timeout": 5,
-        },
-        logger=logger or MagicMock(name="logger"),
-    )
+def test_delete_quotes_returns_zero_when_first_batch_is_empty(mock_psycopg_connect) -> None:
+    """rowcount=0 on first execute → break immediately, total=0."""
+    mock_psycopg_connect.cursor.rowcount = 0
+    result = _make_connector().delete_quotes_before_date(cutoff_date=date(2023, 5, 13))
+    assert result == 0
 
 
-def _run(mock_psycopg_connect, *, fetchone_return, logger=None):
-    """Call has_quotes_for_reporting_date and return (connector, result)."""
-    mock_psycopg_connect.cursor.fetchone.return_value = fetchone_return
-    connector = _make_connector(logger=logger)
-    result = connector.has_quotes_for_reporting_date(reporting_date=REPORTING_DATE)
-    return connector, result
+def test_delete_quotes_accumulates_across_batches(mock_psycopg_connect) -> None:
+    """rowcount=[10, 0] → one real batch then stop, total=10."""
+    cursor = mock_psycopg_connect.cursor
+    rowcounts = iter([10, 0])
+    cursor.execute.side_effect = lambda *_: setattr(cursor, "rowcount", next(rowcounts))
 
-
-# ---------------------------------------------------------------------------
-# Return value
-# ---------------------------------------------------------------------------
-
-def test_returns_true_when_exists_flag_is_true(mock_psycopg_connect) -> None:
-    _, result = _run(mock_psycopg_connect, fetchone_return=(True,))
-    assert result is True
-
-
-def test_returns_false_when_exists_flag_is_false(mock_psycopg_connect) -> None:
-    _, result = _run(mock_psycopg_connect, fetchone_return=(False,))
-    assert result is False
-
-
-def test_returns_false_when_fetchone_returns_none(mock_psycopg_connect) -> None:
-    _, result = _run(mock_psycopg_connect, fetchone_return=None)
-    assert result is False
-
-
-def test_returns_false_when_fetchone_returns_empty_tuple(mock_psycopg_connect) -> None:
-    _, result = _run(mock_psycopg_connect, fetchone_return=())
-    assert result is False
-
-
-def test_return_type_is_bool(mock_psycopg_connect) -> None:
-    _, result = _run(mock_psycopg_connect, fetchone_return=(True,))
-    assert type(result) is bool
-
-
-# ---------------------------------------------------------------------------
-# DB interaction
-# ---------------------------------------------------------------------------
-
-def test_executes_query_exactly_once(mock_psycopg_connect) -> None:
-    _run(mock_psycopg_connect, fetchone_return=(True,))
-    mock_psycopg_connect.cursor.execute.assert_called_once()
-
-
-def test_passes_correct_query_to_execute(mock_psycopg_connect) -> None:
-    _run(mock_psycopg_connect, fetchone_return=(True,))
-    query_arg = mock_psycopg_connect.cursor.execute.call_args.args[0]
-    assert query_arg is HAS_QUOTES_FOR_REPORTING_DATE_QUERY
-
-
-def test_passes_reporting_date_as_parameter(mock_psycopg_connect) -> None:
-    _run(mock_psycopg_connect, fetchone_return=(True,))
-    params = mock_psycopg_connect.cursor.execute.call_args.args[1]
-    assert REPORTING_DATE in params
-
-
-def test_calls_fetchone_exactly_once(mock_psycopg_connect) -> None:
-    _run(mock_psycopg_connect, fetchone_return=(True,))
-    mock_psycopg_connect.cursor.fetchone.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-
-def test_logs_at_least_twice(mock_psycopg_connect) -> None:
-    logger = MagicMock()
-    _run(mock_psycopg_connect, fetchone_return=(True,), logger=logger)
-    assert logger.info.call_count >= 2
-
-
-def test_start_log_contains_reporting_date(mock_psycopg_connect) -> None:
-    logger = MagicMock()
-    _run(mock_psycopg_connect, fetchone_return=(True,), logger=logger)
-    first_log: str = logger.info.call_args_list[0].args[0]
-    assert str(REPORTING_DATE) in first_log
-
-
-def test_completion_log_contains_reporting_date(mock_psycopg_connect) -> None:
-    logger = MagicMock()
-    _run(mock_psycopg_connect, fetchone_return=(True,), logger=logger)
-    all_logs = [c.args[0] for c in logger.info.call_args_list]
-    assert any(str(REPORTING_DATE) in msg for msg in all_logs)
-
-
-def test_completion_log_reflects_true_result(mock_psycopg_connect) -> None:
-    logger = MagicMock()
-    _run(mock_psycopg_connect, fetchone_return=(True,), logger=logger)
-    all_logs = [c.args[0] for c in logger.info.call_args_list]
-    assert any("True" in msg for msg in all_logs)
-
-
-def test_completion_log_reflects_false_result(mock_psycopg_connect) -> None:
-    logger = MagicMock()
-    _run(mock_psycopg_connect, fetchone_return=(False,), logger=logger)
-    all_logs = [c.args[0] for c in logger.info.call_args_list]
-    assert any("False" in msg for msg in all_logs)
+    result = _make_connector().delete_quotes_before_date(cutoff_date=date(2023, 5, 13))
+    assert result == 10
