@@ -1,15 +1,5 @@
-from pyspark.sql.types import StringType, StructField, StructType
+podman cp D:\dev\src\dlg\motor-eqd\entity_store\sql\ddl\. b4c-local-entity-store:/tmp/ddl/
 
-def test_no_type_mismatch_when_types_match():
-    field = StructField("name", StringType(), True)
-    schema = StructType([field])
-
-    dataframe = MagicMock()
-    dataframe.schema.fields = [field]  # same field = same type
-
-    validate_dataframe_schema(
-        dataframe=dataframe,
-        expected_schema=schema,
-        check_types=True,
-        check_nullable=False,
-    )
+podman exec b4c-local-entity-store psql -U motor_eqd -d b4c-local-entity-store -f /tmp/ddl/001_create_tables.sql
+podman exec b4c-local-entity-store psql -U motor_eqd -d b4c-local-entity-store -f /tmp/ddl/002_create_indexes.sql
+podman exec b4c-local-entity-store psql -U motor_eqd -d b4c-local-entity-store -f /tmp/ddl/003_seed_cluster_types_and_partitions.sql
