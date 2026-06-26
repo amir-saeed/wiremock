@@ -1,10 +1,15 @@
-def test_no_type_mismatch_when_types_match(mock_dataframe, mock_schema):
-    # actual and expected schemas have the same type on every column
-    # check_types=True but no mismatch → should NOT raise
+from pyspark.sql.types import StringType, StructField, StructType
+
+def test_no_type_mismatch_when_types_match():
+    field = StructField("name", StringType(), True)
+    schema = StructType([field])
+
+    dataframe = MagicMock()
+    dataframe.schema.fields = [field]  # same field = same type
+
     validate_dataframe_schema(
-        dataframe=mock_dataframe,
-        expected_schema=matching_schema,   # same types as actual
+        dataframe=dataframe,
+        expected_schema=schema,
         check_types=True,
         check_nullable=False,
     )
-    # passes without raising = branch covered
