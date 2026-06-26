@@ -1,125 +1,377 @@
-"""Tests for src/utils/s3.py — check_dap_s3_not_exist."""
-from datetime import date
-from unittest.mock import MagicMock
+"""Tests for src/pipelines/maintenance/maintenance_pipeline.py.
+
+Strategy
+--------
+`execute` is the only non-trivial code path. We call it directly on a
+MaintenancePipeline instance — bypassing `run()` entirely so we never touch
+GlueContext or SparkContext (both need a real Spark cluster).
+
+The four step modules (retention, partitions, duplicate_check, ingestion)
+are patched at the *pipeline* module's namespace so the patch applies
+regardless of how the module was imported.
+"""
+from __future__ import annotations
+
+from datetime import UTC, date, datetime
+from types import SimpleNamespace
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from utils.exceptions import AlreadyExistsError
-from utils.s3 import DAP_S3_PREFIX_TEMPLATE, check_dap_s3_not_exist
+from pipelines.maintenance.maintenance_pipeline import MaintenancePipeline
+from test import constants
+from utils.enums import Env, JobName
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 REPORTING_DATE = date(2026, 5, 12)
-BUCKET = "b4c-dal-local-data-quote-enrichment"
-PREFIX = DAP_S3_PREFIX_TEMPLATE.format(date=REPORTING_DATE)
+EXECUTION_TS = datetime(2026, 5, 12, 9, 0, 0, tzinfo=UTC)
+
+PIPELINE_MODULE = "pipelines.maintenance.maintenance_pipeline"
 
 
-def _make_s3(key_count: int = 0) -> MagicMock:
-    s3 = MagicMock()
-    s3.list_objects_v2.return_value = {"KeyCount": key_count}
-    return s3
+def _make_glue_runtime() -> SimpleNamespace:
+    return SimpleNamespace(
+        job_name=JobName.MAINTENANCE,
+        env=Env.LOCAL,
+        reporting_date=REPORTING_DATE,
+        execution_ts=EXECUTION_TS,
+        metastore=constants.METASTORE,
+        config_s3=constants.CONFIG_S3,
+        dap_s3=constants.DAP_S3,
+    )
+
+
+def _make_job_context() -> MagicMock:
+    ctx = MagicMock()
+    ctx.glue_runtime = _make_glue_runtime()
+    return ctx
+
+
+def _make_resources() -> MagicMock:
+    resources = MagicMock()
+    resources.postgres = MagicMock()
+    resources.spark = MagicMock()
+    return resources
+
+
+def _make_pipeline() -> MaintenancePipeline:
+    pipeline = MaintenancePipeline()
+    pipeline.logger = MagicMock()
+    return pipeline
 
 
 # ---------------------------------------------------------------------------
-# Happy path
+# _build_glue_args
 # ---------------------------------------------------------------------------
 
-def test_passes_when_no_objects_exist() -> None:
-    check_dap_s3_not_exist(
-        reporting_date=REPORTING_DATE,
-        s3=_make_s3(key_count=0),
-        bucket=BUCKET,
-        logger=MagicMock(),
-    )
+def test_build_glue_args_contains_job_name() -> None:
+    ctx = _make_job_context()
+    result = MaintenancePipeline._build_glue_args(ctx)
+    assert result["JOB_NAME"] == JobName.MAINTENANCE.value
 
 
-def test_calls_list_objects_v2_with_correct_args() -> None:
-    s3 = _make_s3()
-
-    check_dap_s3_not_exist(
-        reporting_date=REPORTING_DATE,
-        s3=s3,
-        bucket=BUCKET,
-        logger=MagicMock(),
-    )
-
-    s3.list_objects_v2.assert_called_once_with(
-        Bucket=BUCKET,
-        Prefix=PREFIX,
-        MaxKeys=1,
-    )
+def test_build_glue_args_contains_reporting_date() -> None:
+    ctx = _make_job_context()
+    result = MaintenancePipeline._build_glue_args(ctx)
+    assert result["REPORTING_DATE"] == str(REPORTING_DATE)
 
 
-def test_uses_correct_prefix_format() -> None:
-    s3 = _make_s3()
+def test_build_glue_args_contains_env() -> None:
+    ctx = _make_job_context()
+    result = MaintenancePipeline._build_glue_args(ctx)
+    assert result["ENV"] == Env.LOCAL.value
 
-    check_dap_s3_not_exist(
-        reporting_date=REPORTING_DATE,
-        s3=s3,
-        bucket=BUCKET,
-        logger=MagicMock(),
-    )
 
-    _, kwargs = s3.list_objects_v2.call_args
-    assert kwargs["Prefix"] == "reporting_date=2026-05-12/"
+def test_build_glue_args_contains_execution_ts() -> None:
+    ctx = _make_job_context()
+    result = MaintenancePipeline._build_glue_args(ctx)
+    assert result["EXECUTION_TS"] == EXECUTION_TS.isoformat()
+
+
+def test_build_glue_args_returns_exactly_four_keys() -> None:
+    ctx = _make_job_context()
+    result = MaintenancePipeline._build_glue_args(ctx)
+    assert set(result.keys()) == {"JOB_NAME", "REPORTING_DATE", "ENV", "EXECUTION_TS"}
 
 
 # ---------------------------------------------------------------------------
-# Duplicate detected
+# execute — each step is called
 # ---------------------------------------------------------------------------
 
-def test_raises_when_objects_exist() -> None:
-    with pytest.raises(AlreadyExistsError):
-        check_dap_s3_not_exist(
-            reporting_date=REPORTING_DATE,
-            s3=_make_s3(key_count=1),
-            bucket=BUCKET,
-            logger=MagicMock(),
-        )
+@patch(f"{PIPELINE_MODULE}.retention")
+@patch(f"{PIPELINE_MODULE}.partitions")
+@patch(f"{PIPELINE_MODULE}.duplicate_check")
+@patch(f"{PIPELINE_MODULE}.ingestion")
+def test_execute_calls_apply_retention(ingestion, duplicate_check, partitions, retention) -> None:
+    pipeline = _make_pipeline()
+    ctx = _make_job_context()
+    resources = _make_resources()
+
+    pipeline.execute(ctx, resources)
+
+    retention.apply_retention.assert_called_once()
 
 
-def test_error_reporting_date_matches() -> None:
-    with pytest.raises(AlreadyExistsError) as exc_info:
-        check_dap_s3_not_exist(
-            reporting_date=REPORTING_DATE,
-            s3=_make_s3(key_count=1),
-            bucket=BUCKET,
-            logger=MagicMock(),
-        )
+@patch(f"{PIPELINE_MODULE}.retention")
+@patch(f"{PIPELINE_MODULE}.partitions")
+@patch(f"{PIPELINE_MODULE}.duplicate_check")
+@patch(f"{PIPELINE_MODULE}.ingestion")
+def test_execute_calls_ensure_partitions(ingestion, duplicate_check, partitions, retention) -> None:
+    pipeline = _make_pipeline()
+    ctx = _make_job_context()
+    resources = _make_resources()
 
-    assert exc_info.value.reporting_date == REPORTING_DATE
+    pipeline.execute(ctx, resources)
 
-
-def test_error_location_contains_bucket_and_prefix() -> None:
-    with pytest.raises(AlreadyExistsError) as exc_info:
-        check_dap_s3_not_exist(
-            reporting_date=REPORTING_DATE,
-            s3=_make_s3(key_count=1),
-            bucket=BUCKET,
-            logger=MagicMock(),
-        )
-
-    assert exc_info.value.location == f"s3://{BUCKET}/{PREFIX}"
+    partitions.ensure_partitions.assert_called_once()
 
 
-def test_key_count_zero_does_not_raise() -> None:
-    s3 = MagicMock()
-    s3.list_objects_v2.return_value = {"KeyCount": 0}
+@patch(f"{PIPELINE_MODULE}.retention")
+@patch(f"{PIPELINE_MODULE}.partitions")
+@patch(f"{PIPELINE_MODULE}.duplicate_check")
+@patch(f"{PIPELINE_MODULE}.ingestion")
+def test_execute_calls_check_quotes_not_exist(ingestion, duplicate_check, partitions, retention) -> None:
+    pipeline = _make_pipeline()
+    ctx = _make_job_context()
+    resources = _make_resources()
 
-    check_dap_s3_not_exist(
-        reporting_date=REPORTING_DATE,
-        s3=s3,
-        bucket=BUCKET,
-        logger=MagicMock(),
-    )
+    pipeline.execute(ctx, resources)
+
+    duplicate_check.check_quotes_not_exist.assert_called_once()
 
 
-def test_missing_key_count_in_response_does_not_raise() -> None:
-    """Response without KeyCount key defaults to 0 — no error."""
-    s3 = MagicMock()
-    s3.list_objects_v2.return_value = {}
+@patch(f"{PIPELINE_MODULE}.retention")
+@patch(f"{PIPELINE_MODULE}.partitions")
+@patch(f"{PIPELINE_MODULE}.duplicate_check")
+@patch(f"{PIPELINE_MODULE}.ingestion")
+def test_execute_calls_ingest_quotes(ingestion, duplicate_check, partitions, retention) -> None:
+    pipeline = _make_pipeline()
+    ctx = _make_job_context()
+    resources = _make_resources()
 
-    check_dap_s3_not_exist(
-        reporting_date=REPORTING_DATE,
-        s3=s3,
-        bucket=BUCKET,
-        logger=MagicMock(),
-    )
+    pipeline.execute(ctx, resources)
+
+    ingestion.ingest_quotes.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# execute — correct args forwarded to each step
+# ---------------------------------------------------------------------------
+
+@patch(f"{PIPELINE_MODULE}.retention")
+@patch(f"{PIPELINE_MODULE}.partitions")
+@patch(f"{PIPELINE_MODULE}.duplicate_check")
+@patch(f"{PIPELINE_MODULE}.ingestion")
+def test_execute_passes_reporting_date_to_retention(ingestion, duplicate_check, partitions, retention) -> None:
+    pipeline = _make_pipeline()
+    ctx = _make_job_context()
+    resources = _make_resources()
+
+    pipeline.execute(ctx, resources)
+
+    assert retention.apply_retention.call_args.kwargs["reporting_date"] == REPORTING_DATE
+
+
+@patch(f"{PIPELINE_MODULE}.retention")
+@patch(f"{PIPELINE_MODULE}.partitions")
+@patch(f"{PIPELINE_MODULE}.duplicate_check")
+@patch(f"{PIPELINE_MODULE}.ingestion")
+def test_execute_passes_postgres_to_retention(ingestion, duplicate_check, partitions, retention) -> None:
+    pipeline = _make_pipeline()
+    ctx = _make_job_context()
+    resources = _make_resources()
+
+    pipeline.execute(ctx, resources)
+
+    assert retention.apply_retention.call_args.kwargs["postgres"] is resources.postgres
+
+
+@patch(f"{PIPELINE_MODULE}.retention")
+@patch(f"{PIPELINE_MODULE}.partitions")
+@patch(f"{PIPELINE_MODULE}.duplicate_check")
+@patch(f"{PIPELINE_MODULE}.ingestion")
+def test_execute_passes_job_context_to_retention(ingestion, duplicate_check, partitions, retention) -> None:
+    pipeline = _make_pipeline()
+    ctx = _make_job_context()
+    resources = _make_resources()
+
+    pipeline.execute(ctx, resources)
+
+    assert retention.apply_retention.call_args.kwargs["job_context"] is ctx
+
+
+@patch(f"{PIPELINE_MODULE}.retention")
+@patch(f"{PIPELINE_MODULE}.partitions")
+@patch(f"{PIPELINE_MODULE}.duplicate_check")
+@patch(f"{PIPELINE_MODULE}.ingestion")
+def test_execute_passes_reporting_date_to_partitions(ingestion, duplicate_check, partitions, retention) -> None:
+    pipeline = _make_pipeline()
+    ctx = _make_job_context()
+    resources = _make_resources()
+
+    pipeline.execute(ctx, resources)
+
+    assert partitions.ensure_partitions.call_args.kwargs["reporting_date"] == REPORTING_DATE
+
+
+@patch(f"{PIPELINE_MODULE}.retention")
+@patch(f"{PIPELINE_MODULE}.partitions")
+@patch(f"{PIPELINE_MODULE}.duplicate_check")
+@patch(f"{PIPELINE_MODULE}.ingestion")
+def test_execute_passes_postgres_to_partitions(ingestion, duplicate_check, partitions, retention) -> None:
+    pipeline = _make_pipeline()
+    ctx = _make_job_context()
+    resources = _make_resources()
+
+    pipeline.execute(ctx, resources)
+
+    assert partitions.ensure_partitions.call_args.kwargs["postgres"] is resources.postgres
+
+
+@patch(f"{PIPELINE_MODULE}.retention")
+@patch(f"{PIPELINE_MODULE}.partitions")
+@patch(f"{PIPELINE_MODULE}.duplicate_check")
+@patch(f"{PIPELINE_MODULE}.ingestion")
+def test_execute_passes_reporting_date_to_duplicate_check(ingestion, duplicate_check, partitions, retention) -> None:
+    pipeline = _make_pipeline()
+    ctx = _make_job_context()
+    resources = _make_resources()
+
+    pipeline.execute(ctx, resources)
+
+    assert duplicate_check.check_quotes_not_exist.call_args.kwargs["reporting_date"] == REPORTING_DATE
+
+
+@patch(f"{PIPELINE_MODULE}.retention")
+@patch(f"{PIPELINE_MODULE}.partitions")
+@patch(f"{PIPELINE_MODULE}.duplicate_check")
+@patch(f"{PIPELINE_MODULE}.ingestion")
+def test_execute_passes_postgres_to_duplicate_check(ingestion, duplicate_check, partitions, retention) -> None:
+    pipeline = _make_pipeline()
+    ctx = _make_job_context()
+    resources = _make_resources()
+
+    pipeline.execute(ctx, resources)
+
+    assert duplicate_check.check_quotes_not_exist.call_args.kwargs["postgres"] is resources.postgres
+
+
+@patch(f"{PIPELINE_MODULE}.retention")
+@patch(f"{PIPELINE_MODULE}.partitions")
+@patch(f"{PIPELINE_MODULE}.duplicate_check")
+@patch(f"{PIPELINE_MODULE}.ingestion")
+def test_execute_passes_reporting_date_to_ingestion(ingestion, duplicate_check, partitions, retention) -> None:
+    pipeline = _make_pipeline()
+    ctx = _make_job_context()
+    resources = _make_resources()
+
+    pipeline.execute(ctx, resources)
+
+    assert ingestion.ingest_quotes.call_args.kwargs["reporting_date"] == REPORTING_DATE
+
+
+@patch(f"{PIPELINE_MODULE}.retention")
+@patch(f"{PIPELINE_MODULE}.partitions")
+@patch(f"{PIPELINE_MODULE}.duplicate_check")
+@patch(f"{PIPELINE_MODULE}.ingestion")
+def test_execute_passes_spark_to_ingestion(ingestion, duplicate_check, partitions, retention) -> None:
+    pipeline = _make_pipeline()
+    ctx = _make_job_context()
+    resources = _make_resources()
+
+    pipeline.execute(ctx, resources)
+
+    assert ingestion.ingest_quotes.call_args.kwargs["spark"] is resources.spark
+
+
+@patch(f"{PIPELINE_MODULE}.retention")
+@patch(f"{PIPELINE_MODULE}.partitions")
+@patch(f"{PIPELINE_MODULE}.duplicate_check")
+@patch(f"{PIPELINE_MODULE}.ingestion")
+def test_execute_passes_postgres_to_ingestion(ingestion, duplicate_check, partitions, retention) -> None:
+    pipeline = _make_pipeline()
+    ctx = _make_job_context()
+    resources = _make_resources()
+
+    pipeline.execute(ctx, resources)
+
+    assert ingestion.ingest_quotes.call_args.kwargs["postgres"] is resources.postgres
+
+
+@patch(f"{PIPELINE_MODULE}.retention")
+@patch(f"{PIPELINE_MODULE}.partitions")
+@patch(f"{PIPELINE_MODULE}.duplicate_check")
+@patch(f"{PIPELINE_MODULE}.ingestion")
+def test_execute_passes_job_context_to_ingestion(ingestion, duplicate_check, partitions, retention) -> None:
+    pipeline = _make_pipeline()
+    ctx = _make_job_context()
+    resources = _make_resources()
+
+    pipeline.execute(ctx, resources)
+
+    assert ingestion.ingest_quotes.call_args.kwargs["job_context"] is ctx
+
+
+# ---------------------------------------------------------------------------
+# execute — step ordering (retention → partitions → duplicate_check → ingestion)
+# ---------------------------------------------------------------------------
+
+@patch(f"{PIPELINE_MODULE}.retention")
+@patch(f"{PIPELINE_MODULE}.partitions")
+@patch(f"{PIPELINE_MODULE}.duplicate_check")
+@patch(f"{PIPELINE_MODULE}.ingestion")
+def test_execute_steps_run_in_order(ingestion, duplicate_check, partitions, retention) -> None:
+    """Steps must run in the documented order: retention → partitions → dupe check → ingestion."""
+    manager = MagicMock()
+    manager.attach_mock(retention.apply_retention, "retention")
+    manager.attach_mock(partitions.ensure_partitions, "partitions")
+    manager.attach_mock(duplicate_check.check_quotes_not_exist, "duplicate_check")
+    manager.attach_mock(ingestion.ingest_quotes, "ingestion")
+
+    pipeline = _make_pipeline()
+    pipeline.execute(_make_job_context(), _make_resources())
+
+    call_names = [c[0] for c in manager.mock_calls]
+    assert call_names == ["retention", "partitions", "duplicate_check", "ingestion"]
+
+
+# ---------------------------------------------------------------------------
+# execute — logging
+# ---------------------------------------------------------------------------
+
+@patch(f"{PIPELINE_MODULE}.retention")
+@patch(f"{PIPELINE_MODULE}.partitions")
+@patch(f"{PIPELINE_MODULE}.duplicate_check")
+@patch(f"{PIPELINE_MODULE}.ingestion")
+def test_execute_logs_start_message(ingestion, duplicate_check, partitions, retention) -> None:
+    pipeline = _make_pipeline()
+    pipeline.execute(_make_job_context(), _make_resources())
+
+    assert pipeline.logger.info.call_count >= 2
+
+
+@patch(f"{PIPELINE_MODULE}.retention")
+@patch(f"{PIPELINE_MODULE}.partitions")
+@patch(f"{PIPELINE_MODULE}.duplicate_check")
+@patch(f"{PIPELINE_MODULE}.ingestion")
+def test_execute_start_log_contains_reporting_date(ingestion, duplicate_check, partitions, retention) -> None:
+    pipeline = _make_pipeline()
+    pipeline.execute(_make_job_context(), _make_resources())
+
+    first_log = pipeline.logger.info.call_args_list[0].args[0]
+    assert str(REPORTING_DATE) in first_log
+
+
+@patch(f"{PIPELINE_MODULE}.retention")
+@patch(f"{PIPELINE_MODULE}.partitions")
+@patch(f"{PIPELINE_MODULE}.duplicate_check")
+@patch(f"{PIPELINE_MODULE}.ingestion")
+def test_execute_completion_log_contains_reporting_date(ingestion, duplicate_check, partitions, retention) -> None:
+    pipeline = _make_pipeline()
+    pipeline.execute(_make_job_context(), _make_resources())
+
+    all_logs = [c.args[0] for c in pipeline.logger.info.call_args_list]
+    assert any(str(REPORTING_DATE) in msg for msg in all_logs)
