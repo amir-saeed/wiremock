@@ -1,19 +1,31 @@
 # ---------------------------------------------------------------------------
-# delete_quotes_before_date
+# ensure_quote_partition
 # ---------------------------------------------------------------------------
 
-def test_delete_quotes_returns_zero_when_first_batch_is_empty(mock_psycopg_connect) -> None:
-    """rowcount=0 on first execute → break immediately, total=0."""
-    mock_psycopg_connect.cursor.rowcount = 0
-    result = _make_connector().delete_quotes_before_date(cutoff_date=date(2023, 5, 13))
-    assert result == 0
+def test_ensure_partition_returns_false_when_already_exists(mock_psycopg_connect) -> None:
+    """Partition exists → logs and returns False without creating."""
+    mock_psycopg_connect.cursor.fetchone.return_value = (True,)
+    result = _make_connector().ensure_quote_partition(
+        reporting_date=date(2026, 5, 1), partition_name="quote_2026_05"
+    )
+    assert result is False
 
 
-def test_delete_quotes_accumulates_across_batches(mock_psycopg_connect) -> None:
-    """rowcount=[10, 0] → one real batch then stop, total=10."""
-    cursor = mock_psycopg_connect.cursor
-    rowcounts = iter([10, 0])
-    cursor.execute.side_effect = lambda *_: setattr(cursor, "rowcount", next(rowcounts))
+def test_ensure_partition_returns_true_when_created(mock_psycopg_connect) -> None:
+    """Partition missing (non-December) → creates it and returns True."""
+    mock_psycopg_connect.cursor.fetchone.return_value = (False,)
+    result = _make_connector().ensure_quote_partition(
+        reporting_date=date(2026, 5, 1), partition_name="quote_2026_05"
+    )
+    assert result is True
 
-    result = _make_connector().delete_quotes_before_date(cutoff_date=date(2023, 5, 13))
-    assert result == 10
+
+def test_ensure_partition_december_end_date_rolls_over_to_next_year(mock_psycopg_connect) -> None:
+    """month == 12 branch: end_date must be Jan 1 of the following year."""
+    mock_psycopg_connect.cursor.fetchone.return_value = (False,)
+    _make_connector().ensure_quote_partition(
+        reporting_date=date(2026, 12, 1), partition_name="quote_2026_12"
+    )
+    # Second cursor.execute carries [start_date, end_date] — end_date must be 2027-01-01
+    create_call_params = mock_psycopg_connect.cursor.execute.call_args_list[1].args[1]
+    assert create_call_params[1] == date(2027, 1, 1)
