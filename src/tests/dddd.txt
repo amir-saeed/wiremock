@@ -1,4 +1,13 @@
-podman exec <glue-container> python /tmp/glue/jobs/maintenance_job.py `
+podman exec `
+  -e AWS_DEFAULT_REGION=eu-west-1 `
+  -e ES_PASSWORD=motor_eqd `
+  -e PYTHONPATH=/tmp/glue/src:/usr/share/aws/glue-pds `
+  -e AWS_ACCESS_KEY_ID=test `
+  -e AWS_SECRET_ACCESS_KEY=test `
+  -e AWS_ENDPOINT_URL_DYNAMODB=http://10.72.95.111:8000 `
+  -e AWS_ENDPOINT_URL_S3=http://10.72.95.111:9090 `
+  -e AWS_S3_FORCE_PATH_STYLE=true `
+  glue-test2 python /tmp/glue/jobs/maintenance_job.py `
   --JOB_SUBTYPE person `
   --ENV local `
   --REPORTING_DATE 2026-06-26 `
@@ -10,5 +19,3 @@ podman exec <glue-container> python /tmp/glue/jobs/maintenance_job.py `
   --ES_PORT 5432 `
   --ES_DATABASE b4c-local-entity-store `
   --ES_USER motor_eqd
-
-  $env:ES_PASSWORD = "motor_eqd"
