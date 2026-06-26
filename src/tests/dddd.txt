@@ -1,5 +1,14 @@
-podman cp D:\dev\src\dlg\motor-eqd\entity_store\sql\ddl\. b4c-local-entity-store:/tmp/ddl/
+podman exec <glue-container> python /tmp/glue/jobs/maintenance_job.py `
+  --JOB_SUBTYPE person `
+  --ENV local `
+  --REPORTING_DATE 2026-06-26 `
+  --EXECUTION_TS 20260626100000 `
+  --METASTORE arn:aws:glue:eu-west-1:123456789012:catalog `
+  --CONFIG_S3 s3://b4c-dal-local-data-quotes-shredded-lfs/config `
+  --DAP_S3 s3://b4c-dal-local-data-quote-enrichment `
+  --ES_HOST 10.72.95.111 `
+  --ES_PORT 5432 `
+  --ES_DATABASE b4c-local-entity-store `
+  --ES_USER motor_eqd
 
-podman exec b4c-local-entity-store psql -U motor_eqd -d b4c-local-entity-store -f /tmp/ddl/001_create_tables.sql
-podman exec b4c-local-entity-store psql -U motor_eqd -d b4c-local-entity-store -f /tmp/ddl/002_create_indexes.sql
-podman exec b4c-local-entity-store psql -U motor_eqd -d b4c-local-entity-store -f /tmp/ddl/003_seed_cluster_types_and_partitions.sql
+  $env:ES_PASSWORD = "motor_eqd"
