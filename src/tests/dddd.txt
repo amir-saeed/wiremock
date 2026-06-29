@@ -1,20 +1,103 @@
--- Create partitions for old dates first (table is PARTITION BY RANGE)
-CREATE TABLE IF NOT EXISTS entity_store.quote_2022_01
-    PARTITION OF entity_store.quote
-    FOR VALUES FROM ('2022-01-01') TO ('2022-02-01');
 
-CREATE TABLE IF NOT EXISTS entity_store.quote_2022_06
-    PARTITION OF entity_store.quote
-    FOR VALUES FROM ('2022-06-01') TO ('2022-07-01');
+from __future__ import annotations
 
-CREATE TABLE IF NOT EXISTS entity_store.quote_2023_01
-    PARTITION OF entity_store.quote
-    FOR VALUES FROM ('2023-01-01') TO ('2023-02-01');
+import sys
+from datetime import date, datetime, timezone
+from io import BytesIO
 
--- Insert records older than 3 years (cutoff is ~2023-05-13)
-INSERT INTO entity_store.quote (correlationid, source, reporting_date, execution_ts, source_timestamp) VALUES
-  ('corr-001', 'aggregator', '2022-01-15', '2022-01-15 09:00:00+00', '2022-01-15 08:55:00+00'),
-  ('corr-002', 'direct',     '2022-01-15', '2022-01-15 09:00:00+00', '2022-01-15 08:56:00+00'),
-  ('corr-003', 'aggregator', '2022-06-20', '2022-06-20 09:00:00+00', '2022-06-20 08:55:00+00'),
-  ('corr-004', 'broker',     '2022-06-20', '2022-06-20 09:00:00+00', '2022-06-20 08:57:00+00'),
-  ('corr-005', 'direct',     '2023-01-10', '2023-01-10 09:00:00+00', '2023-01-10 08:55:00+00');
+import boto3
+import pandas as pd
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+S3_ENDPOINT = "http://10.72.95.111:9090"
+BUCKET = "b4c-dal-local-data-quotes-shredded-lfs"
+BASE_PREFIX = "quote_journey/shredded_parquet/no_lambda/B4C_REQUEST_QUOTE"
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _partition_prefix(reporting_date: date) -> str:
+    return (
+        f"{BASE_PREFIX}/"
+        f"dal_year={reporting_date.year:04d}/"
+        f"dal_month={reporting_date.month:02d}/"
+        f"dal_day={reporting_date.day:02d}"
+    )
+
+
+def _make_s3_client():
+    return boto3.client(
+        "s3",
+        endpoint_url=S3_ENDPOINT,
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+        region_name="eu-west-1",
+    )
+
+
+def _ensure_bucket(s3, bucket: str) -> None:
+    existing = [b["Name"] for b in s3.list_buckets().get("Buckets", [])]
+    if bucket not in existing:
+        s3.create_bucket(Bucket=bucket)
+        print(f"  Created bucket: {bucket}")
+    else:
+        print(f"  Bucket exists: {bucket}")
+
+
+def _build_test_data(reporting_date: date) -> pd.DataFrame:
+    ts = datetime(
+        reporting_date.year,
+        reporting_date.month,
+        reporting_date.day,
+        9, 0, 0,
+        tzinfo=timezone.utc,
+    )
+    rows = [
+        {"correlationid": f"corr-seed-{i:03d}", "channel": "aggregator", "source_timestamp": ts}
+        for i in range(1, 6)
+    ]
+    rows += [
+        {"correlationid": f"corr-seed-{i:03d}", "channel": "direct", "source_timestamp": ts}
+        for i in range(6, 11)
+    ]
+    return pd.DataFrame(rows)
+
+
+def _upload_parquet(s3, df: pd.DataFrame, bucket: str, key: str) -> None:
+    buf = BytesIO()
+    df.to_parquet(buf, index=False, engine="pyarrow")
+    buf.seek(0)
+    s3.put_object(Bucket=bucket, Key=key, Body=buf.getvalue())
+    print(f"  Uploaded: s3://{bucket}/{key}  ({len(df)} rows)")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    if len(sys.argv) > 1:
+        reporting_date = date.fromisoformat(sys.argv[1])
+    else:
+        reporting_date = date.today()
+
+    print(f"Seeding S3 mock for reporting_date={reporting_date}")
+    print(f"Endpoint: {S3_ENDPOINT}")
+
+    s3 = _make_s3_client()
+    _ensure_bucket(s3, BUCKET)
+
+    df = _build_test_data(reporting_date)
+    prefix = _partition_prefix(reporting_date)
+    key = f"{prefix}/quotes.parquet"
+
+    _upload_parquet(s3, df, BUCKET, key)
+    print("Done.")
+
+
+if __name__ == "__main__":
+    main()
