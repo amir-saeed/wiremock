@@ -1,6 +1,0 @@
-
-@patch(f"{PIPELINE_MODULE}.helpers")
-def test_execute_passes_data_retention_days_to_retention(helpers) -> None:
-    ctx = _make_job_context()
-    _make_pipeline().execute(ctx, _make_resources())
-    assert helpers.apply_retention.call_args.kwargs["data_retention_days"] is ctx.job.data_retention_days

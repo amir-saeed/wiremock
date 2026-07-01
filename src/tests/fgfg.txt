@@ -1,0 +1,3 @@
+cd D:\dev\src\dlg\motor-eqd\glue
+uv build
+uv run python -c "import zipfile; [print(f) for f in zipfile.ZipFile('dist/motor_eqd_glue-0.1.1.dev0-py3-none-any.whl').namelist() if '.yaml' in f]"
