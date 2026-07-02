@@ -1,3 +1,29 @@
+-- January 2022
+CREATE TABLE IF NOT EXISTS entity_store.quote_2022_01
+PARTITION OF entity_store.quote
+FOR VALUES FROM ('2022-01-01') TO ('2022-02-01');
+
+-- March 2022
+CREATE TABLE IF NOT EXISTS entity_store.quote_2022_03
+PARTITION OF entity_store.quote
+FOR VALUES FROM ('2022-03-01') TO ('2022-04-01');
+
+-- June 2022
+CREATE TABLE IF NOT EXISTS entity_store.quote_2022_06
+PARTITION OF entity_store.quote
+FOR VALUES FROM ('2022-06-01') TO ('2022-07-01');
+
+-- September 2022
+CREATE TABLE IF NOT EXISTS entity_store.quote_2022_09
+PARTITION OF entity_store.quote
+FOR VALUES FROM ('2022-09-01') TO ('2022-10-01');
+
+-- February 2023
+CREATE TABLE IF NOT EXISTS entity_store.quote_2023_02
+PARTITION OF entity_store.quote
+FOR VALUES FROM ('2023-02-01') TO ('2023-03-01');
+
+
 INSERT INTO entity_store.quote (correlationid, source, reporting_date, execution_ts, source_timestamp) VALUES
 ('a3f8b2d1-4e5c-4f6a-8b9d-1c2e3f4a5b6c', 'MSM', '2022-01-15', '2022-01-15 09:00:00+00', '2022-01-15 08:55:00+00'),
 ('7d2e1f3a-5b6c-4d7e-9f0a-1b2c3d4e5f6a', 'GOC', '2022-01-15', '2022-01-15 09:01:00+00', '2022-01-15 08:56:00+00'),
