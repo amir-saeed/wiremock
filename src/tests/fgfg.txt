@@ -1,3 +1,97 @@
-cd D:\dev\src\dlg\motor-eqd\glue
-uv build
-uv run python -c "import zipfile; [print(f) for f in zipfile.ZipFile('dist/motor_eqd_glue-0.1.1.dev0-py3-none-any.whl').namelist() if '.yaml' in f]"
+"""Generate a test parquet file locally and print the S3 upload path.
+
+Usage:
+    uv run python scripts/generate_parquet_local.py 2026-06-25
+    uv run python scripts/generate_parquet_local.py              # defaults to today
+
+Output:
+    - Saves parquet to: glue/dist/quotes_<date>.parquet
+    - Prints exact S3 path to upload it to
+"""
+from __future__ import annotations
+
+import sys
+from datetime import date, datetime, timezone
+from pathlib import Path
+
+import uuid
+
+import pandas as pd
+
+# ---------------------------------------------------------------------------
+# Real S3 bucket config (rc3dev)
+# ---------------------------------------------------------------------------
+ENV = "rc3dev"
+BUCKET = f"b4c-dal-{ENV}-data-quotes-shredded-lfs"
+BASE_PREFIX = "quote_journey/shredded_parquet/no_lambda/QUOTE_HEADER"
+
+
+def _partition_prefix(reporting_date: date) -> str:
+    return (
+        f"{BASE_PREFIX}/"
+        f"dal_year={reporting_date.year:04d}/"
+        f"dal_month={reporting_date.month:02d}/"
+        f"dal_day={reporting_date.day:02d}"
+    )
+
+
+SOURCES = ["MSM", "GOC", "CTM", "CON", "QZN"]  # 5 columns in entity_store.quote: correlationid, source, reporting_date, execution_ts, source_timestamp
+
+
+def _build_data(reporting_date: date) -> pd.DataFrame:
+    """3 parquet columns — ingestion derives reporting_date and execution_ts from these."""
+    rows = []
+    for i, source in enumerate(SOURCES * 3):  # 15 rows, 3 per source
+        ts = datetime(
+            reporting_date.year,
+            reporting_date.month,
+            reporting_date.day,
+            i, 0, 0,
+            tzinfo=timezone.utc,
+        )
+        rows.append({
+            "correlationid": str(uuid.uuid4()),   # 36-char UUID e.g. 550e8400-e29b-41d4-a716-446655440000
+            "channel": source,                     # renamed to 'source' during ingestion
+            "source_timestamp": ts,
+        })
+    return pd.DataFrame(rows)
+
+
+def main() -> None:
+    reporting_date = date.fromisoformat(sys.argv[1]) if len(sys.argv) > 1 else date.today()
+
+    # Save parquet locally
+    out_dir = Path(__file__).parent.parent / "dist"
+    out_dir.mkdir(exist_ok=True)
+    local_file = out_dir / f"quotes_{reporting_date}.parquet"
+
+    df = _build_data(reporting_date)
+    df.to_parquet(local_file, index=False, engine="pyarrow")
+
+    # Build S3 path
+    prefix = _partition_prefix(reporting_date)
+    s3_key = f"{prefix}/quotes.parquet"
+    s3_path = f"s3://{BUCKET}/{s3_key}"
+
+    print()
+    print(f"✓ File saved locally:")
+    print(f"  {local_file}")
+    print()
+    print(f"Upload this file to S3 at:")
+    print(f"  Bucket : {BUCKET}")
+    print(f"  Folder : {prefix}/")
+    print(f"  Key    : {s3_key}")
+    print(f"  Full   : {s3_path}")
+    print()
+    print(f"In S3 console, navigate to:")
+    print(f"  {BUCKET}")
+    print(f"  └── quote_journey/shredded_parquet/no_lambda/QUOTE_HEADER/")
+    print(f"      └── dal_year={reporting_date.year:04d}/")
+    print(f"          └── dal_month={reporting_date.month:02d}/")
+    print(f"              └── dal_day={reporting_date.day:02d}/   ← upload quotes.parquet here")
+    print()
+    print(f"Then run Glue job with --REPORTING_DATE {reporting_date}")
+
+
+if __name__ == "__main__":
+    main()
