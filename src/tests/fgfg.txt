@@ -35,3 +35,16 @@ INSERT INTO entity_store.quote (correlationid, source, reporting_date, execution
 ('12a3b4c5-d6e7-4f8a-9b0c-1d2e3f4a5b6c', 'CTM', '2022-09-05', '2022-09-05 11:01:00+00', '2022-09-05 10:58:00+00'),
 ('89b0c1d2-e3f4-4a5b-6c7d-8e9f0a1b2c3d', 'CON', '2023-02-28', '2023-02-28 09:30:00+00', '2023-02-28 09:27:00+00'),
 ('56c7d8e9-f0a1-4b2c-3d4e-5f6a7b8c9d0e', 'QZN', '2023-02-28', '2023-02-28 09:31:00+00', '2023-02-28 09:28:00+00');
+
+
+
+## Overview
+
+The Maintenance Glue job is a daily batch job that keeps the `entity_store.quote` PostgreSQL table healthy. It runs four steps in sequence:
+
+| Step | Name | What it does |
+|------|------|--------------|
+| 1 | Retention | Deletes records older than 1095 days (3 years) |
+| 2 | Ensure Partitions | Creates the monthly PostgreSQL partition for the reporting date if missing |
+| 3 | Duplicate Check | Fails fast if quotes already exist for the reporting date |
+| 4 | Ingest Quotes | Reads daily parquet from Glue catalog, writes rows to `entity_store.quote` |
